@@ -123,7 +123,7 @@ def parse_valor_series(series: pd.Series) -> pd.Series:
     return series.apply(parse_valor_cell)
 
 # ---------- MENU LATERAL OTIMIZADO ----------
-st.sidebar.title("📌 Menu Principale")
+st.sidebar.title("📌 Menu Principal")
 menu_principal = st.sidebar.radio("", [
     "🏠 Dashboard",
     "📊 Relatórios",
