@@ -13,12 +13,10 @@ import streamlit as st
 st.set_page_config(page_title="Controle de Hospedagem 4.0", layout="wide")
 
 # ============== BANCO DE DADOS ======================
-DB_DIR = "db"
-DB_PATH = os.path.join(DB_DIR, "hospedagem.db")
-os.makedirs(DB_DIR, exist_ok=True)
-
+ 
 def conectar():
-    return sqlite3.connect(DB_PATH, check_same_thread=False)
+    return sqlite3.connect("hospedagem.db", check_same_thread=False)
+ 
 
 def inicializar_db():
     conn = conectar()
