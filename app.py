@@ -493,6 +493,68 @@ elif aba == "Noites Reservadas":
                 tabela = tabela.reindex(ordem_meses)
                 st.dataframe(tabela.fillna(0).astype(int), use_container_width=True)
 # ============== RELATÓRIO DE DESPESAS ==============
+elif aba == "Relatório de Despesas":
+    st.header("Despesas por Mês, Unidade e Tipo")
+
+    unidades_df = get_unidades()
+    despesas_df = get_despesas()
+
+    if unidades_df.empty or despesas_df.empty:
+        st.info("Cadastre unidades e despesas para visualizar este relatório.")
+    else:
+        # Merge despesas com unidades para ter nome
+        des = despesas_df.merge(unidades_df, left_on="unidade_id", right_on="id", suffixes=("", "_u"))
+        des["data"] = pd.to_datetime(des["data"], errors="coerce")
+        des = des.dropna(subset=["data"])
+        des["ano"] = des["data"].dt.year
+        des["mes_num"] = des["data"].dt.month
+        des["nome_mes"] = des["mes_num"].map({
+            1:"Jan", 2:"Fev", 3:"Mar", 4:"Abr", 5:"Mai", 6:"Jun",
+            7:"Jul", 8:"Ago", 9:"Set", 10:"Out", 11:"Nov", 12:"Dez"
+        })
+
+        # ---- Filtros ----
+        anos = sorted(des["ano"].unique())
+        c1, c2 = st.columns([1, 3])
+        with c1:
+            ano_sel = st.selectbox("Ano", anos, index=len(anos)-1)
+        with c2:
+            unidades_opts = sorted(unidades_df["nome"].unique())
+            unidades_sel = st.multiselect("Unidades", unidades_opts, default=unidades_opts)
+
+        tipos_opts = sorted(des["tipo"].dropna().unique()) if "tipo" in des.columns else []
+        tipo_sel = st.multiselect("Tipo de Despesa", tipos_opts, default=tipos_opts)
+
+        # Aplicar filtros
+        df_f = des[des["ano"] == ano_sel].copy()
+        if unidades_sel:
+            df_f = df_f[df_f["nome"].isin(unidades_sel)]
+        if tipo_sel:
+            df_f = df_f[df_f["tipo"].isin(tipo_sel)]
+
+        # Agregar por mês, unidade e tipo
+        agg_df = df_f.groupby(["nome_mes", "nome", "tipo"], as_index=False)["valor"].sum()
+
+        if agg_df.empty:
+            st.warning("Não há despesas para os filtros selecionados.")
+        else:
+            fig = px.bar(
+                agg_df,
+                x="nome_mes",
+                y="valor",
+                color="tipo",
+                facet_col="nome",
+                category_orders={"nome_mes": ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"]},
+                labels={"valor": "Valor (R$)", "nome_mes": "Mês", "nome": "Unidade", "tipo": "Tipo de Despesa"},
+                title=f"Despesas por Mês, Unidade e Tipo - {ano_sel}"
+            )
+            fig.update_layout(barmode="stack", height=600)
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Mostrar tabela
+            with st.expander("Ver tabela detalhada"):
+                st.dataframe(agg_df, use_container_width=True)
+
 elif aba == "Análise de Receita e Lucro":
     st.header("Análise de Receita x Despesa com Lucro (por mês).")
 
