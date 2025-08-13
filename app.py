@@ -494,7 +494,7 @@ elif aba == "Noites Reservadas":
                 st.dataframe(tabela.fillna(0).astype(int), use_container_width=True)
 # ============== RELATÓRIO DE DESPESAS ==============
 elif aba == "Análise de Receita e Lucro":
-    st.header("Análise de Receita x Despesa com Lucro (por mês)")
+    st.header("Análise de Receita x Despesa com Lucro (por mês).")
 
     unidades_df = get_unidades()
     locacoes_df = get_locacoes()
