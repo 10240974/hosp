@@ -6,6 +6,7 @@ from datetime import date, timedelta
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import sqlite3
 import streamlit as st
 
@@ -13,10 +14,9 @@ import streamlit as st
 st.set_page_config(page_title="Controle de Hospedagem 4.0", layout="wide")
 
 # ============== BANCO DE DADOS ======================
- 
+
 def conectar():
     return sqlite3.connect("hospedagem.db", check_same_thread=False)
- 
 
 def inicializar_db():
     conn = conectar()
@@ -137,11 +137,12 @@ def card(col, titulo, valor, subtitulo=""):
         st.metric(titulo, valor, delta=subtitulo)
 
 def resumo_ocupacao(locacoes_df: pd.DataFrame, inicio: date, fim: date):
-    """Retorna (noites_ocupadas, taxa_ocupacao%)."""
+    """Retorna (noites_ocupadas, taxa_ocupacao%).
+    Day-use (checkin >= checkout) conta 1 noite no dia do check-in."""
     if locacoes_df.empty or inicio > fim:
         return 0, 0.0
+
     noites_total, noites_ocupadas = 0, 0
-    # noites por unidade dentro do período
     unidades_ids = locacoes_df["unidade_id"].unique().tolist()
     for uid in unidades_ids:
         dias_janela = pd.date_range(inicio, fim, freq="D")
@@ -150,9 +151,13 @@ def resumo_ocupacao(locacoes_df: pd.DataFrame, inicio: date, fim: date):
         for _, loc in locs.iterrows():
             ci = pd.to_datetime(loc["checkin"]).date()
             co = pd.to_datetime(loc["checkout"]).date()
-            if ci < co:
+            if ci >= co:
+                if inicio <= ci <= fim:
+                    noites_ocupadas += 1
+            else:
                 dr = pd.date_range(max(ci, inicio), min(co, fim) - pd.Timedelta(days=1), freq="D")
                 noites_ocupadas += len([d for d in dr if inicio <= d.date() <= fim])
+
     taxa = (noites_ocupadas / noites_total * 100) if noites_total else 0.0
     return int(noites_ocupadas), round(taxa, 1)
 
@@ -184,7 +189,10 @@ menu_principal = st.sidebar.radio(
 if menu_principal == "🏠 Dashboard":
     aba = "Dashboard de Ocupação"
 elif menu_principal == "📊 Relatórios":
-    aba = st.sidebar.radio("📈 Tipo de Relatório", ["Relatório de Despesas", "Análise de Receita e Lucro"])
+    aba = st.sidebar.radio(
+        "📈 Tipo de Relatório",
+        ["Relatório de Despesas", "Análise de Receita e Lucro", "Noites Reservadas"]
+    )
 elif menu_principal == "🗂 Gestão de Dados":
     aba = st.sidebar.radio("📁 Dados Cadastrais", ["Cadastro de Unidades", "Locações", "Despesas", "Precificação"])
 else:
@@ -239,7 +247,7 @@ if aba == "Dashboard de Ocupação":
     if plataforma_filtro != "Todas" and not locacoes_dash.empty:
         locacoes_dash = locacoes_dash[locacoes_dash["plataforma"] == plataforma_filtro]
 
-    # aplica recorte de período
+    # aplica recorte de período (inclui reservas que tocam a janela)
     if not locacoes_dash.empty:
         locacoes_dash = locacoes_dash[
             (pd.to_datetime(locacoes_dash["checkin"]).dt.date <= data_fim) &
@@ -248,18 +256,24 @@ if aba == "Dashboard de Ocupação":
 
     # ====== Cards Mobile (resumo) ======
     if MOBILE:
-        # Receita no período
+        # Receita no período (com day-use)
         receita_periodo = 0.0
         if not locacoes_dash.empty:
-            # rateia valor por noite no período
             for _, loc in locacoes_dash.iterrows():
                 ci = pd.to_datetime(loc["checkin"]).date()
                 co = pd.to_datetime(loc["checkout"]).date()
                 val = float(loc.get("valor") or 0.0)
-                if ci < co:
+
+                if ci >= co:
+                    # day-use: 1 diária no dia do check-in se dentro da janela
+                    if data_inicio <= ci <= data_fim:
+                        receita_periodo += val
+                else:
                     noites_totais = (co - ci).days
                     if noites_totais > 0:
-                        noites_no_periodo = pd.date_range(max(ci, data_inicio), min(co, data_fim) - pd.Timedelta(days=1), freq="D")
+                        noites_no_periodo = pd.date_range(
+                            max(ci, data_inicio), min(co, data_fim) - pd.Timedelta(days=1), freq="D"
+                        )
                         receita_periodo += (val / noites_totais) * len(noites_no_periodo)
 
         # Despesa no período
@@ -272,14 +286,11 @@ if aba == "Dashboard de Ocupação":
             if not unidades_selecionadas:
                 despesas_periodo = float(d["valor"].sum()) if not d.empty else 0.0
             else:
-                # filtra por unidades selecionadas
                 d = d.merge(unidades_dash[["id","nome"]], left_on="unidade_id", right_on="id", how="left")
                 d = d[d["nome"].isin(unidades_selecionadas)]
                 despesas_periodo = float(d["valor"].sum()) if not d.empty else 0.0
 
         lucro = receita_periodo - despesas_periodo
-
-        # Noites ocupadas e taxa
         noites_ocup, taxa = resumo_ocupacao(locacoes_dash, data_inicio, data_fim)
 
         c1, c2 = st.columns(2)
@@ -310,7 +321,9 @@ if aba == "Dashboard de Ocupação":
                 for tipo, dia, loc in sorted(proximos, key=lambda x: x[1]):
                     st.write(f"{tipo} • {dia.strftime('%d/%m/%Y')} • {loc.get('hospede','')} • {loc.get('plataforma','')}")
 
-    # ====== Tabela calêndrio (desktop e também útil no mobile para overview) ======
+    # ====== Tabela calendário (desktop/overview) ======
+    dias_periodo = pd.date_range(start=data_inicio, end=data_fim, freq="D")
+    dias_str = [d.strftime("%d/%m") for d in dias_periodo]
     index_nomes = unidades_dash_filtrado["nome"].tolist() + ["Total R$"]
     valores_num = pd.DataFrame(0.0, index=index_nomes, columns=dias_str)
     tabela_icon = pd.DataFrame("", index=index_nomes, columns=dias_str)
@@ -323,27 +336,31 @@ if aba == "Dashboard de Ocupação":
                 checkout = pd.to_datetime(loc["checkout"]).date()
                 valor = float(loc.get("valor", 0) or 0)
 
-                if checkin == checkout:
-                    dias_locados = []
+                # ---- DAY-USE: conta 1 diária no dia do check-in ----
+                if checkin >= checkout:
+                    dias_locados = [checkin]
                 else:
                     dr = pd.date_range(checkin, checkout - pd.Timedelta(days=1), freq="D").to_pydatetime()
                     dias_locados = [d.date() for d in dr]
 
-                valor_dia = (valor / len(dias_locados)) if len(dias_locados) > 0 else 0.0
+                num_diarias = max(1, len(dias_locados))
+                valor_dia = (valor / num_diarias) if num_diarias > 0 else 0.0
 
+                # Marca ocupação e soma valor
                 for d in dias_locados:
                     dia_str = d.strftime("%d/%m")
                     if dia_str in dias_str:
                         tabela_icon.loc[unidade["nome"], dia_str] = "🟧"
                         valores_num.loc[unidade["nome"], dia_str] += valor_dia
 
+                # Check-in / Check-out (sem sobrescrever 🟧)
                 if data_inicio <= checkin <= data_fim:
                     dia_checkin = checkin.strftime("%d/%m")
-                    if dia_checkin in dias_str:
+                    if dia_checkin in dias_str and tabela_icon.loc[unidade["nome"], dia_checkin] == "":
                         tabela_icon.loc[unidade["nome"], dia_checkin] = "🟦"
                 if data_inicio <= checkout <= data_fim:
                     dia_checkout = checkout.strftime("%d/%m")
-                    if dia_checkout in dias_str:
+                    if dia_checkout in dias_str and tabela_icon.loc[unidade["nome"], dia_checkout] == "":
                         tabela_icon.loc[unidade["nome"], dia_checkout] = "◧"
 
     valores_num.loc["Total R$", dias_str] = valores_num[dias_str].sum(axis=0)
@@ -376,6 +393,216 @@ if aba == "Dashboard de Ocupação":
 - 🟦 Check-in (após 14h)  
 - ◧ Check-out (até 11h — sem valor)
 """)
+# =========================
+#  RELATÓRIO: NOITES POR DIA
+# =========================
+elif aba == "Noites Reservadas":
+    st.header("Noites Reservadas por Mês")
+
+    # Carrega dados
+    unidades_df = get_unidades()
+    locacoes_df = get_locacoes()
+
+    if unidades_df.empty or locacoes_df.empty:
+        st.info("Cadastre unidades e locações para visualizar este relatório.")
+    else:
+        # Junta para ter o nome da unidade
+        loc = locacoes_df.merge(unidades_df, left_on="unidade_id", right_on="id", suffixes=("", "_u"))
+
+        # Converte datas
+        loc["checkin"] = pd.to_datetime(loc["checkin"], errors="coerce")
+        loc["checkout"] = pd.to_datetime(loc["checkout"], errors="coerce")
+        loc = loc.dropna(subset=["checkin", "checkout"])
+
+        # Expande reserva em noites (cada dia entre checkin e checkout-1)
+        # Isso garante atribuição correta das noites ao mês correspondente
+        registros = []
+        for _, r in loc.iterrows():
+            ci = r["checkin"].date()
+            co = r["checkout"].date()
+            if ci >= co:
+                # Reserva de 0 noite (checkin == checkout) -> ignora como 0 noite
+                continue
+            nights = pd.date_range(ci, co - pd.Timedelta(days=1), freq="D")
+            for d in nights:
+                registros.append({
+                    "unidade": r["nome"],
+                    "data_noite": d.date(),
+                })
+
+        if not registros:
+            st.info("Não há noites reservadas para o período atual dos dados.")
+        else:
+            nights_df = pd.DataFrame(registros)
+            nights_df["ano"] = pd.to_datetime(nights_df["data_noite"]).dt.year
+            nights_df["mes_num"] = pd.to_datetime(nights_df["data_noite"]).dt.month
+
+            # Filtros
+            anos = sorted(nights_df["ano"].unique().tolist())
+            col_f1, col_f2, col_f3 = st.columns([1, 2, 1])
+            with col_f1:
+                ano_sel = st.selectbox("Ano", anos, index=len(anos)-1)
+            with col_f2:
+                unidades_opts = sorted(unidades_df["nome"].unique().tolist())
+                unidades_sel = st.multiselect("Unidades", unidades_opts, default=unidades_opts)
+            with col_f3:
+                modo = st.radio("Modo", ["Agrupado", "Empilhado"], horizontal=True)
+
+            df_f = nights_df[(nights_df["ano"] == ano_sel)]
+            if unidades_sel:
+                df_f = df_f[df_f["unidade"].isin(unidades_sel)]
+
+            # Agrupa por mês e unidade
+            agg = df_f.groupby(["mes_num", "unidade"]).size().reset_index(name="noites")
+
+            # Prepara nomes de meses (PT-BR) e ordenação correta
+            mes_label = {1:"Jan",2:"Fev",3:"Mar",4:"Abr",5:"Mai",6:"Jun",7:"Jul",8:"Ago",9:"Set",10:"Out",11:"Nov",12:"Dez"}
+            agg["mes"] = agg["mes_num"].map(mes_label)
+            ordem_meses = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"]
+
+            # Garante que meses sem reserva apareçam com zero (para visual contínua)
+            # Cria grade completa de meses x unidades selecionadas
+            import itertools
+            unidades_base = unidades_sel if unidades_sel else unidades_opts
+            grade = pd.DataFrame(list(itertools.product(range(1,13), unidades_base)), columns=["mes_num","unidade"])
+            grade["mes"] = grade["mes_num"].map(mes_label)
+
+            agg = grade.merge(agg, on=["mes_num","unidade","mes"], how="left").fillna({"noites":0})
+
+            # Gráfico
+            barmode = "group" if modo == "Agrupado" else "relative"
+            fig = px.bar(
+                agg,
+                x="mes",
+                y="noites",
+                color="unidade",
+                category_orders={"mes": ordem_meses},
+                labels={"mes": "Mês", "noites": "Noites"},
+                title=f"Noites Reservadas por Mês • {ano_sel}",
+                text="noites",
+            )
+            fig.update_layout(barmode=barmode, xaxis_title="Mês", yaxis_title="Noites")
+            fig.update_traces(textposition="outside", cliponaxis=False)
+
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Tabela (opcional)
+            with st.expander("Ver tabela agregada"):
+                tabela = agg.pivot_table(index="mes", columns="unidade", values="noites", aggfunc="sum")
+                # Reordena os meses nas linhas
+                tabela = tabela.reindex(ordem_meses)
+                st.dataframe(tabela.fillna(0).astype(int), use_container_width=True)
+# ============== RELATÓRIO DE DESPESAS ==============
+elif aba == "Análise de Receita e Lucro":
+    st.header("Análise de Receita x Despesa com Lucro (por mês)")
+
+    unidades_df = get_unidades()
+    locacoes_df = get_locacoes()
+    despesas_df = get_despesas()
+
+    if unidades_df.empty or (locacoes_df.empty and despesas_df.empty):
+        st.info("Cadastre unidades, locações e despesas para visualizar este relatório.")
+    else:
+        # ---- Preparo base: juntar nome da unidade em locações e despesas ----
+        if not locacoes_df.empty:
+            loc = locacoes_df.merge(unidades_df, left_on="unidade_id", right_on="id", suffixes=("", "_u"))
+            loc["checkin"] = pd.to_datetime(loc["checkin"], errors="coerce")
+            loc = loc.dropna(subset=["checkin"])
+            loc["ano"] = loc["checkin"].dt.year
+            loc["mes_num"] = loc["checkin"].dt.month
+            loc["nome_unidade"] = loc["nome"]
+        else:
+            loc = pd.DataFrame(columns=["nome_unidade","ano","mes_num","valor"])
+
+        if not despesas_df.empty:
+            des = despesas_df.merge(unidades_df, left_on="unidade_id", right_on="id", suffixes=("", "_u"))
+            des["data"] = pd.to_datetime(des["data"], errors="coerce")
+            des = des.dropna(subset=["data"])
+            des["ano"] = des["data"].dt.year
+            des["mes_num"] = des["data"].dt.month
+            des["nome_unidade"] = des["nome"]
+        else:
+            des = pd.DataFrame(columns=["nome_unidade","ano","mes_num","valor"])
+
+        # ---- Filtros (Ano + Unidades) ----
+        anos_loc = loc["ano"].unique().tolist() if not loc.empty else []
+        anos_des = des["ano"].unique().tolist() if not des.empty else []
+        anos = sorted(set(anos_loc + anos_des))
+        if not anos:
+            st.info("Não há dados de anos para agrupar.")
+        else:
+            c1, c2 = st.columns([1, 3])
+            with c1:
+                ano_sel = st.selectbox("Ano", anos, index=len(anos)-1)
+            with c2:
+                unidades_opts = sorted(unidades_df["nome"].unique().tolist())
+                unidades_sel = st.multiselect("Unidades", unidades_opts, default=unidades_opts)
+
+            # Aplica filtros
+            loc_f = loc[loc["ano"] == ano_sel].copy()
+            des_f = des[des["ano"] == ano_sel].copy()
+            if unidades_sel:
+                loc_f = loc_f[loc_f["nome_unidade"].isin(unidades_sel)]
+                des_f = des_f[des_f["nome_unidade"].isin(unidades_sel)]
+
+            # ---- Agregações por mês ----
+            receita_m = (
+                loc_f.groupby("mes_num")["valor"].sum().rename("Receita").reset_index()
+                if not loc_f.empty else pd.DataFrame({"mes_num": [], "Receita": []})
+            )
+            despesa_m = (
+                des_f.groupby("mes_num")["valor"].sum().rename("Despesa").reset_index()
+                if not des_f.empty else pd.DataFrame({"mes_num": [], "Despesa": []})
+            )
+
+            # Grade completa Jan..Dez para mostrar zeros
+            base_meses = pd.DataFrame({"mes_num": list(range(1, 13))})
+            dfm = base_meses.merge(receita_m, on="mes_num", how="left") \
+                            .merge(despesa_m, on="mes_num", how="left")
+            dfm["Receita"] = dfm["Receita"].fillna(0.0)
+            dfm["Despesa"] = dfm["Despesa"].fillna(0.0)
+            dfm["Lucro"] = dfm["Receita"] - dfm["Despesa"]
+
+            mes_label = {1:"Jan",2:"Fev",3:"Mar",4:"Abr",5:"Mai",6:"Jun",7:"Jul",8:"Ago",9:"Set",10:"Out",11:"Nov",12:"Dez"}
+            ordem_meses = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"]
+            dfm["Mês"] = dfm["mes_num"].map(mes_label)
+            dfm = dfm.sort_values("mes_num")
+
+            # ---- Gráfico combinado (barras + linha) ----
+            fig = go.Figure()
+
+            # Barras: Receita
+            fig.add_trace(go.Bar(
+                x=dfm["Mês"], y=dfm["Receita"],
+                name="Receita"
+            ))
+            # Barras: Despesa
+            fig.add_trace(go.Bar(
+                x=dfm["Mês"], y=dfm["Despesa"],
+                name="Despesa"
+            ))
+            # Linha: Lucro (eixo secundário)
+            fig.add_trace(go.Scatter(
+                x=dfm["Mês"], y=dfm["Lucro"],
+                name="Lucro", mode="lines+markers", yaxis="y2"
+            ))
+
+            fig.update_layout(
+                title=f"Receita x Despesa (barras) e Lucro (linha) • {ano_sel}",
+                xaxis=dict(title="Mês", categoryorder="array", categoryarray=ordem_meses),
+                yaxis=dict(title="Valor (R$)"),
+                yaxis2=dict(title="Lucro (R$)", overlaying="y", side="right"),
+                barmode="group",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                margin=dict(l=40, r=40, t=60, b=40),
+            )
+
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Tabela resumo (opcional)
+            with st.expander("Ver tabela mensal"):
+                tabela = dfm[["Mês","Receita","Despesa","Lucro"]].copy()
+                st.dataframe(tabela, use_container_width=True)
 
 # ============== CADASTRO DE UNIDADES ===============
 elif aba == "Cadastro de Unidades":
