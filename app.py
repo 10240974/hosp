@@ -3,6 +3,7 @@ import os
 import re
 import unicodedata
 from datetime import date, timedelta
+from calendar import monthrange  # último dia do mês
 
 import pandas as pd
 import plotly.express as px
@@ -11,17 +12,19 @@ import sqlite3
 import streamlit as st
 
 # ============== CONFIGURAÇÃO DA PÁGINA ==============
-st.set_page_config(page_title="Controle de Hospedagem 4.0", layout="wide")
+st.set_page_config(page_title="Hospedar", layout="wide")
 
 # ============== BANCO DE DADOS ======================
 
 def conectar():
     return sqlite3.connect("hospedagem.db", check_same_thread=False)
 
+# Atualizar a tabela de unidades no banco de dados (com migração)
 def inicializar_db():
     conn = conectar()
     c = conn.cursor()
-    # Unidades
+
+    # Tabelas base (sem colunas novas em 'unidades' aqui, para permitir migração)
     c.execute("""
         CREATE TABLE IF NOT EXISTS unidades (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -31,7 +34,6 @@ def inicializar_db():
             status TEXT
         )
     """)
-    # Locações
     c.execute("""
         CREATE TABLE IF NOT EXISTS locacoes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -45,7 +47,6 @@ def inicializar_db():
             FOREIGN KEY(unidade_id) REFERENCES unidades(id)
         )
     """)
-    # Despesas
     c.execute("""
         CREATE TABLE IF NOT EXISTS despesas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,7 +58,6 @@ def inicializar_db():
             FOREIGN KEY(unidade_id) REFERENCES unidades(id)
         )
     """)
-    # Precificação
     c.execute("""
         CREATE TABLE IF NOT EXISTS precos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,6 +67,16 @@ def inicializar_db():
             FOREIGN KEY(unidade_id) REFERENCES unidades(id)
         )
     """)
+
+    # --- MIGRAÇÃO: garante colunas novas em 'unidades' ---
+    c.execute("PRAGMA table_info(unidades)")
+    cols = {row[1] for row in c.fetchall()}  # nomes das colunas existentes
+
+    if "administracao" not in cols:
+        c.execute("ALTER TABLE unidades ADD COLUMN administracao TEXT DEFAULT 'Não'")
+    if "percentual_administracao" not in cols:
+        c.execute("ALTER TABLE unidades ADD COLUMN percentual_administracao REAL DEFAULT 0.0")
+
     conn.commit()
     conn.close()
 
@@ -179,7 +189,7 @@ def render_locacao_card(row: pd.Series):
 st.sidebar.title("📌 Menu Principal")
 
 # Toggle mobile
-MOBILE = st.sidebar.toggle("📱 Modo Mobile", value=False, help="Ativa interface compacta")
+MOBILE = st.sidebar.toggle("📱 Modo Mobile", value=True, help="Ativa interface compacta")
 
 menu_principal = st.sidebar.radio(
     "",
@@ -191,7 +201,7 @@ if menu_principal == "🏠 Dashboard":
 elif menu_principal == "📊 Relatórios":
     aba = st.sidebar.radio(
         "📈 Tipo de Relatório",
-        ["Relatório de Despesas", "Análise de Receita e Lucro", "Noites Reservadas"]
+        ["Relatório de Despesas", "Análise de Receita e Lucro", "Noites Reservadas", "Administradora"]
     )
 elif menu_principal == "🗂 Gestão de Dados":
     aba = st.sidebar.radio("📁 Dados Cadastrais", ["Cadastro de Unidades", "Locações", "Despesas", "Precificação"])
@@ -200,7 +210,7 @@ else:
 
 # ============== DASHBOARD ===========================
 if aba == "Dashboard de Ocupação":
-    st.title("🏠 Dashboard de Ocupação - Visão Geral")
+    st.title("🏠 Ocupação - Visão Geral")
 
     ano_dash = st.number_input("Ano", min_value=2000, max_value=2100, value=date.today().year)
     unidades_dash = get_unidades()
@@ -209,8 +219,10 @@ if aba == "Dashboard de Ocupação":
 
     st.subheader("Filtro de Período")
     if MOBILE:
-        data_inicio = st.date_input("De", value=date.today().replace(day=1), key="d_i_m")
-        data_fim = st.date_input("Até", value=date.today(), key="d_f_m")
+        hoje = date.today()
+        ultimo_dia = monthrange(hoje.year, hoje.month)[1]
+        data_inicio = st.date_input("De", value=hoje.replace(day=1), key="d_i_m")
+        data_fim = st.date_input("Até", value=hoje.replace(day=ultimo_dia), key="d_f_m")
     else:
         col1, col2 = st.columns(2)
         with col1:
@@ -322,9 +334,14 @@ if aba == "Dashboard de Ocupação":
                     st.write(f"{tipo} • {dia.strftime('%d/%m/%Y')} • {loc.get('hospede','')} • {loc.get('plataforma','')}")
 
     # ====== Tabela calendário (desktop/overview) ======
-    dias_periodo = pd.date_range(start=data_inicio, end=data_fim, freq="D")
+    dias_periodo = pd.date_range(start=data_inicio, end=data_fim, freq="D")[::-1]
     dias_str = [d.strftime("%d/%m") for d in dias_periodo]
-    index_nomes = unidades_dash_filtrado["nome"].tolist() + ["Total R$"]
+
+    # NÃO adiciona "Administração" como linha de unidade
+    index_nomes = (
+        unidades_dash_filtrado["nome"].tolist() if not unidades_dash_filtrado.empty else []
+    ) + ["Total R$"]
+
     valores_num = pd.DataFrame(0.0, index=index_nomes, columns=dias_str)
     tabela_icon = pd.DataFrame("", index=index_nomes, columns=dias_str)
 
@@ -363,16 +380,50 @@ if aba == "Dashboard de Ocupação":
                     if dia_checkout in dias_str and tabela_icon.loc[unidade["nome"], dia_checkout] == "":
                         tabela_icon.loc[unidade["nome"], dia_checkout] = "◧"
 
-    valores_num.loc["Total R$", dias_str] = valores_num[dias_str].sum(axis=0)
-    valores_num["Total R$"] = valores_num[dias_str].sum(axis=1)
-    valores_num["Valor Líquido (-13%)"] = valores_num["Total R$"] * 0.87
-    valores_num["Total Administradora (20%)"] = valores_num["Total R$"] * 0.20
+    # Ocupação diária (evita divisão por zero)
+    denom = max(1, len(unidades_dash_filtrado))
+    ocupacao_diaria = (tabela_icon.apply(lambda col: col.value_counts().get("🟧", 0), axis=0) / denom) * 100
 
     tabela_visual = tabela_icon.copy()
-    for extra_col in ["Total R$", "Valor Líquido (-13%)", "Total Administradora (20%)"]:
+    for extra_col in ["Total R$", "Valor Líquido (-13%)", "Total Administradora"]:
         if extra_col not in tabela_visual.columns:
             tabela_visual[extra_col] = ""
 
+    tabela_visual.loc["Ocupação (%)"] = ocupacao_diaria.map(lambda v: f"{v:.1f}%")
+
+    # Totais diários apenas das unidades (exclui a linha 'Total R$')
+    linhas_base = [idx for idx in valores_num.index if idx != "Total R$"]
+    valores_num.loc["Total R$", dias_str] = valores_num.loc[linhas_base, dias_str].sum(axis=0)
+
+    # Totais por linha (mês)
+    valores_num["Total R$"] = valores_num[dias_str].sum(axis=1)
+    valores_num["Valor Líquido (-13%)"] = valores_num["Total R$"] * 0.87
+
+    # -------- Coluna "Total Administradora" (por unidade, com % próprio) --------
+    admin_col = pd.Series(0.0, index=valores_num.index, dtype=float)
+    if not unidades_dash_filtrado.empty:
+        meta = unidades_dash_filtrado.set_index("nome")
+        for unit_name in meta.index:
+            admin_flag = str(meta.at[unit_name, "administracao"]) if "administracao" in meta.columns else "Não"
+            raw_pct = meta.at[unit_name, "percentual_administracao"] if "percentual_administracao" in meta.columns else 0.0
+            try:
+                pct = float(raw_pct)
+            except Exception:
+                pct = 0.0
+            if pd.isna(pct):
+                pct = 0.0
+
+            if admin_flag == "Sim" and pct > 0:
+                admin_col[unit_name] = valores_num.at[unit_name, "Total R$"] * (pct / 100.0)
+            else:
+                admin_col[unit_name] = 0.0
+
+    # A linha "Total R$" recebe a soma das administrações das unidades
+    admin_col["Total R$"] = float(admin_col.drop(labels=["Total R$"], errors="ignore").sum())
+    valores_num["Total Administradora"] = admin_col
+    # ---------------------------------------------------------------------------
+
+    # Monta visual com valores formatados
     for r in tabela_icon.index:
         for c in dias_str:
             v = float(valores_num.loc[r, c])
@@ -381,9 +432,9 @@ if aba == "Dashboard de Ocupação":
 
     tabela_visual["Total R$"] = valores_num["Total R$"].map(lambda v: f"{v:,.2f}")
     tabela_visual["Valor Líquido (-13%)"] = valores_num["Valor Líquido (-13%)"].map(lambda v: f"{v:,.2f}")
-    tabela_visual["Total Administradora (20%)"] = valores_num["Total Administradora (20%)"].map(lambda v: f"{v:,.2f}")
+    tabela_visual["Total Administradora"] = valores_num["Total Administradora"].map(lambda v: f"{v:,.2f}")
 
-    tabela_visual = tabela_visual[dias_str + ["Total R$", "Valor Líquido (-13%)", "Total Administradora (20%)"]]
+    tabela_visual = tabela_visual[dias_str + ["Total R$", "Valor Líquido (-13%)", "Total Administradora"]]
 
     st.markdown(f"**Ocupação Geral ({data_inicio.strftime('%d/%m/%Y')} a {data_fim.strftime('%d/%m/%Y')})**")
     st.dataframe(tabela_visual, use_container_width=True)
@@ -415,20 +466,15 @@ elif aba == "Noites Reservadas":
         loc = loc.dropna(subset=["checkin", "checkout"])
 
         # Expande reserva em noites (cada dia entre checkin e checkout-1)
-        # Isso garante atribuição correta das noites ao mês correspondente
         registros = []
         for _, r in loc.iterrows():
             ci = r["checkin"].date()
             co = r["checkout"].date()
             if ci >= co:
-                # Reserva de 0 noite (checkin == checkout) -> ignora como 0 noite
                 continue
             nights = pd.date_range(ci, co - pd.Timedelta(days=1), freq="D")
             for d in nights:
-                registros.append({
-                    "unidade": r["nome"],
-                    "data_noite": d.date(),
-                })
+                registros.append({"unidade": r["nome"], "data_noite": d.date()})
 
         if not registros:
             st.info("Não há noites reservadas para o período atual dos dados.")
@@ -455,13 +501,12 @@ elif aba == "Noites Reservadas":
             # Agrupa por mês e unidade
             agg = df_f.groupby(["mes_num", "unidade"]).size().reset_index(name="noites")
 
-            # Prepara nomes de meses (PT-BR) e ordenação correta
+            # Meses (PT-BR)
             mes_label = {1:"Jan",2:"Fev",3:"Mar",4:"Abr",5:"Mai",6:"Jun",7:"Jul",8:"Ago",9:"Set",10:"Out",11:"Nov",12:"Dez"}
             agg["mes"] = agg["mes_num"].map(mes_label)
             ordem_meses = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"]
 
-            # Garante que meses sem reserva apareçam com zero (para visual contínua)
-            # Cria grade completa de meses x unidades selecionadas
+            # Grade completa para zeros
             import itertools
             unidades_base = unidades_sel if unidades_sel else unidades_opts
             grade = pd.DataFrame(list(itertools.product(range(1,13), unidades_base)), columns=["mes_num","unidade"])
@@ -489,9 +534,9 @@ elif aba == "Noites Reservadas":
             # Tabela (opcional)
             with st.expander("Ver tabela agregada"):
                 tabela = agg.pivot_table(index="mes", columns="unidade", values="noites", aggfunc="sum")
-                # Reordena os meses nas linhas
                 tabela = tabela.reindex(ordem_meses)
                 st.dataframe(tabela.fillna(0).astype(int), use_container_width=True)
+
 # ============== RELATÓRIO DE DESPESAS ==============
 elif aba == "Relatório de Despesas":
     st.header("Despesas por Mês, Unidade e Tipo")
@@ -634,20 +679,11 @@ elif aba == "Análise de Receita e Lucro":
             fig = go.Figure()
 
             # Barras: Receita
-            fig.add_trace(go.Bar(
-                x=dfm["Mês"], y=dfm["Receita"],
-                name="Receita"
-            ))
+            fig.add_trace(go.Bar(x=dfm["Mês"], y=dfm["Receita"], name="Receita"))
             # Barras: Despesa
-            fig.add_trace(go.Bar(
-                x=dfm["Mês"], y=dfm["Despesa"],
-                name="Despesa"
-            ))
+            fig.add_trace(go.Bar(x=dfm["Mês"], y=dfm["Despesa"], name="Despesa"))
             # Linha: Lucro (eixo secundário)
-            fig.add_trace(go.Scatter(
-                x=dfm["Mês"], y=dfm["Lucro"],
-                name="Lucro", mode="lines+markers", yaxis="y2"
-            ))
+            fig.add_trace(go.Scatter(x=dfm["Mês"], y=dfm["Lucro"], name="Lucro", mode="lines+markers", yaxis="y2"))
 
             fig.update_layout(
                 title=f"Receita x Despesa (barras) e Lucro (linha) • {ano_sel}",
@@ -674,18 +710,72 @@ elif aba == "Cadastro de Unidades":
         localizacao = st.text_input("Localização")
         capacidade = st.number_input("Capacidade", min_value=1, max_value=20, value=4)
         status = st.selectbox("Status", ["Disponível", "Ocupado", "Manutenção"])
+        administracao = st.selectbox("Possui Administração?", ["Sim", "Não"])
+        percentual_administracao = st.number_input(
+            "Percentual de Administração (%)", min_value=0.0, max_value=100.0, value=0.0
+        ) if administracao == "Sim" else 0.0
         enviar = st.form_submit_button("Cadastrar", use_container_width=MOBILE)
         if enviar and nome:
-            conn = conectar()
-            conn.execute(
-                "INSERT INTO unidades (nome, localizacao, capacidade, status) VALUES (?, ?, ?, ?)",
-                (nome, localizacao, capacidade, status)
-            )
-            conn.commit()
-            conn.close()
-            st.success("Unidade cadastrada!")
+            try:
+                conn = conectar()
+                conn.execute(
+                    """
+                    INSERT INTO unidades (nome, localizacao, capacidade, status, administracao, percentual_administracao)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (nome, localizacao, int(capacidade), status, administracao, float(percentual_administracao))
+                )
+                conn.commit()
+                st.success("Unidade cadastrada!")
+            except Exception as e:
+                st.error(f"Erro ao cadastrar unidade: {e}")
+            finally:
+                conn.close()
+
     st.subheader("Unidades Cadastradas")
-    st.dataframe(get_unidades(), use_container_width=True)
+    unidades = get_unidades()
+    if not unidades.empty:
+        edited_df = st.data_editor(
+            unidades[["id", "nome", "localizacao", "capacidade", "status", "administracao", "percentual_administracao"]],
+            num_rows="dynamic", use_container_width=True, key="editor_unidades"
+        )
+        if st.button("Salvar Alterações nas Unidades"):
+            conn = conectar()
+            try:
+                for _, row in edited_df.iterrows():
+                    conn.execute(
+                        """
+                        UPDATE unidades
+                        SET nome=?, localizacao=?, capacidade=?, status=?, administracao=?, percentual_administracao=?
+                        WHERE id=?
+                        """,
+                        (
+                            row["nome"], row["localizacao"], int(row["capacidade"]), row["status"],
+                            row["administracao"], float(row["percentual_administracao"]), int(row["id"])
+                        )
+                    )
+                conn.commit()
+                st.success("Alterações salvas!")
+            except Exception as e:
+                st.error(f"Erro ao salvar alterações: {e}")
+            finally:
+                conn.close()
+            # Recarrega os dados atualizados
+            unidades = get_unidades()
+
+    st.subheader("Excluir Unidade")
+    if not unidades.empty:
+        id_excluir = st.selectbox("Selecione o ID da unidade para excluir", unidades["id"])
+        if st.button("Excluir Unidade"):
+            conn = conectar()
+            try:
+                conn.execute("DELETE FROM unidades WHERE id=?", (int(id_excluir),))
+                conn.commit()
+                st.success(f"Unidade {id_excluir} excluída!")
+            except Exception as e:
+                st.error(f"Erro ao excluir unidade: {e}")
+            finally:
+                conn.close()
 
 # ============== LOCAÇÕES (MOBILE-FRIENDLY) =========
 elif aba == "Locações":
@@ -866,13 +956,18 @@ elif aba == "Locações":
             )
             if st.button("Salvar Alterações nas Locações"):
                 conn = conectar()
-                for _, row in edited_df.iterrows():
-                    conn.execute(
-                        "UPDATE locacoes SET checkin=?, checkout=?, hospede=?, valor=?, plataforma=?, status_pagamento=? WHERE id=?",
-                        (row["checkin"], row["checkout"], row["hospede"], row["valor"], row["plataforma"], row["status_pagamento"], row["id"])
-                    )
-                conn.commit(); conn.close()
-                st.success("Alterações salvas! Recarregue a página para ver os dados atualizados.")
+                try:
+                    for _, row in edited_df.iterrows():
+                        conn.execute(
+                            "UPDATE locacoes SET checkin=?, checkout=?, hospede=?, valor=?, plataforma=?, status_pagamento=? WHERE id=?",
+                            (row["checkin"], row["checkout"], row["hospede"], float(row["valor"]), row["plataforma"], row["status_pagamento"], int(row["id"]))
+                        )
+                    conn.commit()
+                    st.success("Alterações salvas! Recarregue a página para ver os dados atualizados.")
+                except Exception as e:
+                    st.error(f"Erro ao salvar alterações: {e}")
+                finally:
+                    conn.close()
 
             st.subheader("Excluir Locação")
             id_excluir = st.selectbox("Selecione o ID da locação para excluir", locacoes["id"])
@@ -933,13 +1028,18 @@ elif aba == "Despesas":
             )
             if st.button("Salvar Alterações nas Despesas"):
                 conn = conectar()
-                for _, row in edited_df.iterrows():
-                    conn.execute(
-                        "UPDATE despesas SET data=?, tipo=?, valor=?, descricao=? WHERE id=?",
-                        (row["data"], row["tipo"], float(row["valor"]), row["descricao"], int(row["id"]))
-                    )
-                conn.commit(); conn.close()
-                st.success("Alterações salvas! Recarregue a página para ver os dados atualizados.")
+                try:
+                    for _, row in edited_df.iterrows():
+                        conn.execute(
+                            "UPDATE despesas SET data=?, tipo=?, valor=?, descricao=? WHERE id=?",
+                            (row["data"], row["tipo"], float(row["valor"]), row["descricao"], int(row["id"]))
+                        )
+                    conn.commit()
+                    st.success("Alterações salvas! Recarregue a página para ver os dados atualizados.")
+                except Exception as e:
+                    st.error(f"Erro ao salvar alterações: {e}")
+                finally:
+                    conn.close()
 
         st.subheader("Excluir Despesa")
         if not despesas_filtradas.empty:
@@ -1017,3 +1117,175 @@ elif aba == "Sobre o Sistema":
     Versão: **4.0 (mobile)**  
     Aplicação para gestão completa de hospedagens.
     """)
+# # ============== RELATÓRIO PARA ADMINISTRADORA ========================
+
+elif aba == "Administradora":
+    from calendar import monthrange
+    import urllib.parse as urlparse
+
+    st.header("Relatório para Administradora")
+    
+    # Carregar dados
+    unidades_df = get_unidades()
+    locacoes_df = get_locacoes()
+
+    if unidades_df.empty or locacoes_df.empty:
+        st.info("Cadastre unidades e locações para visualizar este relatório.")
+    else:
+        # Merge locações com unidades para obter nome e % administração
+        loc = locacoes_df.merge(
+            unidades_df[["id", "nome", "administracao", "percentual_administracao"]],
+            left_on="unidade_id", right_on="id", how="left", suffixes=("", "_u")
+        )
+
+        # Converte datas
+        loc["checkin"] = pd.to_datetime(loc["checkin"], errors="coerce").dt.date
+        loc["checkout"] = pd.to_datetime(loc["checkout"], errors="coerce").dt.date
+        loc = loc.dropna(subset=["checkin", "checkout"])
+
+        # ----- Filtros -----
+        anos = sorted(set([d.year for d in loc["checkin"]] + [d.year for d in loc["checkout"]]))
+        col1, col2, col3 = st.columns([1, 1, 2])
+        with col1:
+            ano_sel = st.selectbox("Ano", anos, index=len(anos) - 1)
+        with col2:
+            meses_opts = list(range(1, 12 + 1))
+            mes_sel = st.selectbox("Mês", ["Todos"] + meses_opts, format_func=lambda x: "Todos" if x == "Todos" else f"{x:02}")
+        with col3:
+            unidades_opts = sorted(loc["nome"].dropna().unique().tolist())
+            unidades_sel = st.multiselect("Unidades", unidades_opts, default=unidades_opts)
+
+        # Período alvo
+        if mes_sel == "Todos":
+            period_start = date(ano_sel, 1, 1)
+            period_end = date(ano_sel, 12, 31)
+            periodo_str = f"{ano_sel}"
+            nome_mes = "Todos"
+        else:
+            last_day = monthrange(ano_sel, mes_sel)[1]
+            period_start = date(ano_sel, mes_sel, 1)
+            period_end = date(ano_sel, mes_sel, last_day)
+            periodo_str = f"{mes_sel:02}/{ano_sel}"
+            nome_mes = f"{mes_sel:02}"
+
+        # Mantém apenas reservas que tocam o período
+        loc_f = loc[(loc["checkin"] <= period_end) & (loc["checkout"] >= period_start)].copy()
+        if unidades_sel:
+            loc_f = loc_f[loc_f["nome"].isin(unidades_sel)]
+
+        if loc_f.empty:
+            st.warning("Não há dados para os filtros selecionados.")
+        else:
+            # ---- Cálculos por reserva (linhas da tabela) ----
+            def noites_no_periodo(ci: date, co: date) -> int:
+                # day-use: checkin >= checkout conta 1 se o checkin cair no período
+                if ci >= co:
+                    return 1 if (period_start <= ci <= period_end) else 0
+                ini = max(ci, period_start)
+                fim = min(co, period_end)
+                return max(0, (fim - ini).days)
+
+            def valor_periodo(row) -> float:
+                ci, co = row["checkin"], row["checkout"]
+                total = float(row.get("valor") or 0.0)
+                total_noites = 1 if ci >= co else max(1, (co - ci).days)
+                v_dia = total / total_noites
+                return v_dia * noites_no_periodo(ci, co)
+
+            def valor_adm(row, v_per) -> float:
+                flag = str(row.get("administracao", "Não"))
+                pct = row.get("percentual_administracao", 0.0)
+                try:
+                    pct = float(pct)
+                except Exception:
+                    pct = 0.0
+                if pd.isna(pct):
+                    pct = 0.0
+                return v_per * (pct/100.0) if (flag == "Sim" and pct > 0) else 0.0
+
+            loc_f["Qtde de Noites"] = loc_f.apply(lambda r: noites_no_periodo(r["checkin"], r["checkout"]), axis=1)
+            loc_f["Valor total"] = loc_f.apply(valor_periodo, axis=1)
+            loc_f["Valor administração"] = loc_f.apply(lambda r: valor_adm(r, r["Valor total"]), axis=1)
+
+            # Monta a tabela final (AGORA COM PLATAFORMA)
+            tabela = loc_f.rename(columns={
+                "nome": "Unidade",
+                "checkin": "Check-in",
+                "checkout": "Check-out",
+                "plataforma": "Plataforma",
+            })
+            tabela = tabela[["Unidade", "Plataforma", "Check-in", "Check-out", "Qtde de Noites", "Valor total", "Valor administração"]]
+            tabela = tabela.sort_values(["Unidade", "Check-in", "Check-out"]).reset_index(drop=True)
+
+            # Exibir com formatação monetária
+            tabela_fmt = tabela.copy()
+            tabela_fmt["Valor total"] = tabela_fmt["Valor total"].map(lambda v: f"R$ {v:,.2f}")
+            tabela_fmt["Valor administração"] = tabela_fmt["Valor administração"].map(lambda v: f"R$ {v:,.2f}")
+            st.subheader(f"Resumo por Reserva (período: {periodo_str})")
+            st.dataframe(tabela_fmt, use_container_width=True)
+
+            # Totais do período
+            tot_noites = int(tabela["Qtde de Noites"].sum())
+            tot_valor = float(tabela["Valor total"].sum())
+            tot_adm = float(tabela["Valor administração"].sum())
+            st.caption(f"Totais no período — Noites: {tot_noites} • Valor: R$ {tot_valor:,.2f} • Administração: R$ {tot_adm:,.2f}")
+
+            # Exportar CSV (valores numéricos sem formatação)
+            csv = tabela.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
+            st.download_button(
+                label="📥 Baixar Relatório em CSV",
+                data=csv,
+                file_name=f"relatorio_administradora_{ano_sel}_{nome_mes}.csv",
+                mime="text/csv"
+            )
+
+            # --------- Geração de mensagem (WhatsApp / E-mail) ---------
+            st.subheader("Enviar por WhatsApp / E-mail")
+            colw1, colw2, colw3 = st.columns([2, 2, 1])
+            with colw1:
+                phone = st.text_input("Telefone WhatsApp (DDI+DDD+Número, só dígitos)", value="")
+            with colw2:
+                email = st.text_input("E-mail do destinatário", value="")
+            with colw3:
+                detalhar = st.checkbox("Detalhar reservas", value=False, help="Inclui cada linha da tabela na mensagem")
+
+            def br_money(v: float) -> str:
+                return f"R$ {v:,.2f}"
+
+            # Monta a mensagem
+            linhas = [
+                f"Relatório da Administradora — Período: {periodo_str}",
+                f"Noites: {tot_noites}",
+                f"Valor total: {br_money(tot_valor)}",
+                f"Valor administração: {br_money(tot_adm)}",
+            ]
+            if detalhar:
+                linhas.append("")
+                linhas.append("Detalhes por reserva:")
+                for _, r in tabela.iterrows():
+                    linhas.append(
+                        f"- {r['Unidade']} | {r['Plataforma']} | {r['Check-in'].strftime('%d/%m/%Y')}→{r['Check-out'].strftime('%d/%m/%Y')} | "
+                        f"noites: {int(r['Qtde de Noites'])} | valor: {br_money(float(r['Valor total']))} | adm: {br_money(float(r['Valor administração']))}"
+                    )
+            msg = "\n".join(linhas)
+
+            cbtn1, cbtn2 = st.columns(2)
+            with cbtn1:
+                if st.button("Gerar WhatsApp"):
+                    if not phone.strip():
+                        st.warning("Informe o telefone (apenas dígitos, com DDI). Ex.: 55XXXXXXXXXXX")
+                    else:
+                        link_wa = f"https://wa.me/{phone.strip()}?text={urlparse.quote(msg)}"
+                        st.markdown(f"[Abrir WhatsApp ▶️]({link_wa})")
+            with cbtn2:
+                if st.button("Gerar E-mail"):
+                    if not email.strip():
+                        st.warning("Informe o e-mail do destinatário.")
+                    else:
+                        subject = f"Relatório Administradora - {periodo_str}"
+                        mailto = f"mailto:{email.strip()}?subject={urlparse.quote(subject)}&body={urlparse.quote(msg)}"
+                        st.markdown(f"[Abrir cliente de e-mail ✉️]({mailto})")
+
+            # Pré-visualização da mensagem
+            with st.expander("Pré-visualizar mensagem"):
+                st.text(msg)
