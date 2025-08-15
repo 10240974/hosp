@@ -12,7 +12,104 @@ import sqlite3
 import streamlit as st
 
 # ============== CONFIGURAÇÃO DA PÁGINA ==============
-st.set_page_config(page_title="Hospedar", layout="wide")
+# Configuração da página para abrir com menu lateral fechado
+st.set_page_config(page_title="Hospedar", layout="wide", initial_sidebar_state="collapsed")
+
+# Adicionar estilo para reduzir o espaçamento no topo
+st.markdown(
+    """
+    <style>
+    .block-container {
+        padding-top: 1rem; /* Reduz o espaçamento superior */
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+# Adicionar estilo moderno inspirado no Mercado Pago
+st.markdown(
+    """
+    <style>
+    /* Fonte moderna */
+    @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap');
+    html, body, [class*="css"] {
+        font-family: 'Roboto', sans-serif;
+    }
+
+    /* Cor de fundo */
+    .block-container {
+        background-color: #f5f7fa;
+        padding: 2rem;
+        border-radius: 10px;
+    }
+
+    /* Títulos */
+    h1, h2, h3 {
+        color: #0057e7;
+        font-weight: 700;
+    }
+
+    /* Botões */
+    button[kind="primary"] {
+        background-color: #0057e7 !important;
+        color: white !important;
+        border: none !important;
+        border-radius: 8px !important;
+        padding: 0.5rem 1rem !important;
+        font-weight: 500 !important;
+    }
+    button[kind="primary"]:hover {
+        background-color: #0046c0 !important;
+    }
+
+    /* Inputs */
+    input, select, textarea {
+        border: 1px solid #d1d5db !important;
+        border-radius: 8px !important;
+        padding: 0.5rem !important;
+    }
+
+    /* Tabelas */
+    .dataframe {
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        overflow: hidden;
+    }
+    .dataframe th {
+        background-color: #0057e7;
+        color: white;
+        font-weight: 500;
+        padding: 0.5rem;
+    }
+    .dataframe td {
+        padding: 0.5rem;
+    }
+
+    /* Sidebar */
+    .sidebar .sidebar-content {
+        background-color: #0057e7;
+        color: white;
+    }
+    .sidebar .sidebar-content a {
+        color: white !important;
+    }
+    .sidebar .sidebar-content a:hover {
+        color: #d1d5db !important;
+    }
+
+    /* Métricas */
+    .stMetric {
+        background-color: #ffffff;
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        padding: 1rem;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
 # ============== BANCO DE DADOS ======================
 
@@ -186,14 +283,14 @@ def render_locacao_card(row: pd.Series):
     )
 
 # ============== MENU LATERAL ========================
-st.sidebar.title("📌 Menu Principal")
+st.sidebar.title("Menu Principal")
 
 # Toggle mobile
 MOBILE = st.sidebar.toggle("📱 Modo Mobile", value=True, help="Ativa interface compacta")
 
 menu_principal = st.sidebar.radio(
     "",
-    ["🏠 Dashboard", "📊 Relatórios", "🗂 Gestão de Dados", "⚙️ Configurações"]
+    ["🏠 Dashboard", "📊 Relatórios", "🗂 Dados Cadastrais", "⚙️ Configurações"]
 )
 
 if menu_principal == "🏠 Dashboard":
@@ -203,14 +300,22 @@ elif menu_principal == "📊 Relatórios":
         "📈 Tipo de Relatório",
         ["Relatório de Despesas", "Análise de Receita e Lucro", "Noites Reservadas", "Administradora"]
     )
-elif menu_principal == "🗂 Gestão de Dados":
+elif menu_principal == "🗂 Dados Cadastrais":
     aba = st.sidebar.radio("📁 Dados Cadastrais", ["Cadastro de Unidades", "Locações", "Despesas", "Precificação"])
 else:
     aba = st.sidebar.radio("🔧 Opções do Sistema", ["Parâmetros do Sistema", "Exportar/Importar Dados", "Sobre o Sistema"])
 
 # ============== DASHBOARD ===========================
 if aba == "Dashboard de Ocupação":
-    st.title("🏠 Ocupação - Visão Geral")
+    # Título com fonte menor
+    st.markdown(
+        """
+        <h2 style="font-size:30px; color:black; font-weight:400;  margin-bottom:1rem;">
+            🏠 Ocupação - Visão Geral
+        </h2>
+        """,
+        unsafe_allow_html=True
+    )
 
     ano_dash = st.number_input("Ano", min_value=2000, max_value=2100, value=date.today().year)
     unidades_dash = get_unidades()
