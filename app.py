@@ -1506,7 +1506,8 @@ elif aba == "Administradora":
                     if not phone.strip():
                         st.warning("Informe o telefone (apenas dígitos, com DDI). Ex.: 55XXXXXXXXXXX")
                     else:
-                        link_wa = f"https://wa.me/{phone.strip()}?text={urlparse.quote(msg)}"
+                        import urllib.parse
+                        link_wa = f"https://wa.me/{phone.strip()}?text={urllib.parse.quote(msg)}"
                         st.markdown(f"[Abrir WhatsApp ▶️]({link_wa})")
             with cbtn2:
                     if not email.strip():
