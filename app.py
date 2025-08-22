@@ -1154,7 +1154,103 @@ elif aba == "Despesas":
                     st.error(f"Erro ao salvar alterações: {e}")
                 finally:
                     conn.close()
+###
+# ------ Importação de Despesas via Excel ------
+st.subheader("Importar Despesas (Excel)")
 
+modo_import_despesas = st.radio(
+    "Modo de importação", ["Acrescentar (append)", "Sobrescrever (limpar antes)"],
+    horizontal=True, key="modo_import_despesas"
+)
+
+excel_file = st.file_uploader("Selecione o arquivo Excel", type=["xlsx", "xls"], key="upload_despesas")
+if excel_file is not None:
+    try:
+        # Ler o arquivo Excel
+        df_excel = pd.read_excel(excel_file, dtype=str)
+        df_excel.columns = [c.strip().lower() for c in df_excel.columns]  # Normalizar nomes das colunas
+        df_excel = df_excel.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+
+        # Mapear colunas esperadas
+        alias = {
+            "unidade": ["unidade", "unit", "nome_unidade", "apto", "apartamento", "imovel", "imóvel"],
+            "data": ["data", "date", "data_despesa"],
+            "tipo": ["tipo", "categoria", "tipo_despesa"],
+            "valor": ["valor", "valor_total", "preco", "preço", "amount", "price"],
+            "descricao": ["descricao", "descrição", "detalhes", "observacao", "observação"]
+        }
+
+        def pick(col_alts):
+            for c in col_alts:
+                if c in df_excel.columns:
+                    return c
+            return None
+
+        selected = {k: pick(v) for k, v in alias.items()}
+        rename_map = {v: k for k, v in selected.items() if v is not None}
+        df_excel = df_excel.rename(columns=rename_map)
+
+        # Verificar colunas obrigatórias
+        obrigatorias = ["unidade", "data", "tipo", "valor"]
+        faltando = [c for c in obrigatorias if c not in df_excel.columns]
+        if faltando:
+            st.error(f"Faltam colunas obrigatórias no Excel: {', '.join(faltando)}")
+        else:
+            # Converter colunas
+            df_excel["data"] = pd.to_datetime(df_excel["data"], dayfirst=True, errors="coerce").dt.date
+            df_excel["valor"] = parse_valor_series(df_excel["valor"])
+            df_excel["descricao"] = df_excel["descricao"].fillna("")
+
+            # Exibir prévia dos dados
+            st.dataframe(
+                df_excel[["unidade", "data", "tipo", "valor", "descricao"]].head(20),
+                use_container_width=True, height=360
+            )
+
+            if st.button("Importar Despesas", key="importar_despesas"):
+                unidades_df = get_unidades()
+                if unidades_df.empty:
+                    st.error("Não há unidades cadastradas. Cadastre unidades antes de importar despesas.")
+                else:
+                    conn = conectar()
+                    cur = conn.cursor()
+
+                    if modo_import_despesas == "Sobrescrever (limpar antes)":
+                        cur.execute("DELETE FROM despesas")
+                        conn.commit()
+
+                    mapa_unidade = {_norm(n): int(i) for n, i in zip(unidades_df["nome"], unidades_df["id"])}
+                    inseridos, pulados = 0, 0
+
+                    for _, row in df_excel.iterrows():
+                        try:
+                            unidade_id = mapa_unidade.get(_norm(row.get("unidade")))
+                            data = row.get("data")
+                            tipo = row.get("tipo")
+                            valor = float(row.get("valor") or 0.0)
+                            descricao = row.get("descricao", "")
+
+                            if not unidade_id or pd.isna(data) or not tipo:
+                                pulados += 1
+                                continue
+
+                            cur.execute(
+                                "INSERT INTO despesas (unidade_id, data, tipo, valor, descricao) VALUES (?, ?, ?, ?, ?)",
+                                (unidade_id, str(data), tipo, valor, descricao)
+                            )
+                            inseridos += 1
+                        except Exception:
+                            pulados += 1
+                            continue
+
+                    conn.commit()
+                    conn.close()
+
+                    msg_pref = " (tabela limpa antes)" if modo_import_despesas.startswith("Sobre") else " (adicionados)"
+                    st.success(f"Importação concluída{msg_pref}. Inseridos: {inseridos} | Pulados: {pulados}")
+    except Exception as e:
+        st.error(f"Erro ao processar o arquivo Excel: {e}")
+###
         st.subheader("Excluir Despesa")
         if not despesas_filtradas.empty:
             id_excluir = st.selectbox("Selecione o ID da despesa para excluir", despesas_filtradas["id"], key="excluir_despesa")
@@ -1234,9 +1330,6 @@ elif aba == "Sobre o Sistema":
 # # ============== RELATÓRIO PARA ADMINISTRADORA ========================
 
 elif aba == "Administradora":
-    from calendar import monthrange
-    import urllib.parse as urlparse
-
     st.header("Relatório para Administradora")
     
     # Carregar dados
@@ -1309,7 +1402,7 @@ elif aba == "Administradora":
                 v_dia = total / total_noites
                 return v_dia * noites_no_periodo(ci, co)
 
-            def valor_adm(row, v_per) -> float:
+            def valor_adm(row, v_liquido) -> float:
                 flag = str(row.get("administracao", "Não"))
                 pct = row.get("percentual_administracao", 0.0)
                 try:
@@ -1318,11 +1411,12 @@ elif aba == "Administradora":
                     pct = 0.0
                 if pd.isna(pct):
                     pct = 0.0
-                return v_per * (pct/100.0) if (flag == "Sim" and pct > 0) else 0.0
+                return v_liquido * (pct / 100.0) if (flag == "Sim" and pct > 0) else 0.0
 
             loc_f["Qtde de Noites"] = loc_f.apply(lambda r: noites_no_periodo(r["checkin"], r["checkout"]), axis=1)
-            loc_f["Valor total"] = loc_f.apply(valor_periodo, axis=1)
-            loc_f["Valor administração"] = loc_f.apply(lambda r: valor_adm(r, r["Valor total"]), axis=1)
+            loc_f["Valor total bruto"] = loc_f.apply(valor_periodo, axis=1)
+            loc_f["Valor total líquido"] = loc_f["Valor total bruto"] * 0.87  # Subtraindo 13%
+            loc_f["Valor administração"] = loc_f.apply(lambda r: valor_adm(r, r["Valor total líquido"]), axis=1)
 
             # Monta a tabela final
             tabela = loc_f.rename(columns={
@@ -1331,22 +1425,38 @@ elif aba == "Administradora":
                 "checkout": "Check-out",
                 "plataforma": "Plataforma",
             })
-            tabela = tabela[["Unidade", "Plataforma", "Check-in", "Check-out", "Qtde de Noites", "Valor total", "Valor administração"]]
+            tabela = tabela[["Unidade", "Plataforma", "Check-in", "Check-out", "Qtde de Noites", "Valor total bruto", "Valor total líquido", "Valor administração"]]
             tabela = tabela.sort_values(["Unidade", "Check-in", "Check-out"]).reset_index(drop=True)
+            # Totais do período
+            tot_noites = int(tabela["Qtde de Noites"].sum())
+            tot_valor_bruto = float(tabela["Valor total bruto"].sum())
+            tot_valor_liquido = float(tabela["Valor total líquido"].sum())
+            tot_adm = float(tabela["Valor administração"].sum())
+            st.caption(f"Totais no período — Noites: {tot_noites} • Valor Bruto: R$ {tot_valor_bruto:,.2f} • Valor Líquido: R$ {tot_valor_liquido:,.2f} • Administração: R$ {tot_adm:,.2f}")
+
+            # Adicionar linha de totais
+            totais = {
+                "Unidade": "Total",
+                "Plataforma": "",
+                "Check-in": "",
+                "Check-out": "",
+                "Qtde de Noites": tabela["Qtde de Noites"].sum(),
+                "Valor total bruto": tabela["Valor total bruto"].sum(),
+                "Valor total líquido": tabela["Valor total líquido"].sum(),
+                "Valor administração": tabela["Valor administração"].sum(),
+            }
+            
+            tabela = pd.concat([tabela, pd.DataFrame([totais])], ignore_index=True)
 
             # Exibir com formatação monetária
             tabela_fmt = tabela.copy()
-            tabela_fmt["Valor total"] = tabela_fmt["Valor total"].map(lambda v: f"R$ {v:,.2f}")
-            tabela_fmt["Valor administração"] = tabela_fmt["Valor administração"].map(lambda v: f"R$ {v:,.2f}")
+            tabela_fmt["Valor total bruto"] = tabela_fmt["Valor total bruto"].map(lambda v: f"R$ {v:,.2f}" if pd.notna(v) else "")
+            tabela_fmt["Valor total líquido"] = tabela_fmt["Valor total líquido"].map(lambda v: f"R$ {v:,.2f}" if pd.notna(v) else "")
+            tabela_fmt["Valor administração"] = tabela_fmt["Valor administração"].map(lambda v: f"R$ {v:,.2f}" if pd.notna(v) else "")
             st.subheader(f"Resumo por Reserva (período: {periodo_str})")
             st.dataframe(tabela_fmt, use_container_width=True)
 
-            # Totais do período
-            tot_noites = int(tabela["Qtde de Noites"].sum())
-            tot_valor = float(tabela["Valor total"].sum())
-            tot_adm = float(tabela["Valor administração"].sum())
-            st.caption(f"Totais no período — Noites: {tot_noites} • Valor: R$ {tot_valor:,.2f} • Administração: R$ {tot_adm:,.2f}")
-
+           
             # Exportar CSV (valores numéricos sem formatação)
             csv = tabela.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
             st.download_button(
@@ -1369,21 +1479,25 @@ elif aba == "Administradora":
             def br_money(v: float) -> str:
                 return f"R$ {v:,.2f}"
 
-            # Monta a mensagem
+            # Monta a mensagem com base nos dados filtrados
             linhas = [
                 f"Relatório da Administradora — Período: {periodo_str}",
-                f"Noites: {tot_noites}",
-                f"Valor total: {br_money(tot_valor)}",
-                f"Valor administração: {br_money(tot_adm)}",
+                f"Noites: {int(loc_f['Qtde de Noites'].sum())}",
+                f"Valor total bruto: {br_money(loc_f['Valor total bruto'].sum())}",
+                f"Valor total líquido: {br_money(loc_f['Valor total líquido'].sum())}",
+                f"Valor administração: {br_money(loc_f['Valor administração'].sum())}",
             ]
+
             if detalhar:
                 linhas.append("")
                 linhas.append("Detalhes por reserva:")
-                for _, r in tabela.iterrows():
+                for _, r in loc_f.iterrows():
                     linhas.append(
-                        f"- {r['Unidade']} | {r['Plataforma']} | {r['Check-in'].strftime('%d/%m/%Y')}→{r['Check-out'].strftime('%d/%m/%Y')} | "
-                        f"noites: {int(r['Qtde de Noites'])} | valor: {br_money(float(r['Valor total']))} | adm: {br_money(float(r['Valor administração']))}"
+                        f"- {r['nome']} | {r['plataforma']} | {r['checkin'].strftime('%d/%m/%Y')}→{r['checkout'].strftime('%d/%m/%Y')} | "
+                        f"Noites: {int(r['Qtde de Noites'])} | Valor bruto: {br_money(r['Valor total bruto'])} | "
+                        f"Valor líquido: {br_money(r['Valor total líquido'])} | Administração: {br_money(r['Valor administração'])}"
                     )
+
             msg = "\n".join(linhas)
 
             cbtn1, cbtn2 = st.columns(2)
@@ -1465,3 +1579,5 @@ elif aba == "Relatório de Ganhos Anuais":
             file_name="ganhos_anuais_por_unidade.csv",
             mime="text/csv"
         )
+
+
