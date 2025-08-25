@@ -10,6 +10,9 @@ import plotly.express as px
 import plotly.graph_objects as go
 import sqlite3
 import streamlit as st
+import threading
+import time
+import requests
 
 # ============== CONFIGURAÇÃO DA PÁGINA ==============
 # Configuração da página para abrir com menu lateral fechado
@@ -1093,6 +1096,376 @@ elif aba == "Locações":
         st.info("Cadastre unidades e locações para visualizar e editar aqui.")
 
 # ============== DESPESAS ============================
+
+# # ============== RELATÓRIO PARA ADMINISTRADORA ========================
+
+elif aba == "Administradora":
+    st.header("Relatório para Administradora")
+    
+    # Carregar dados
+    unidades_df = get_unidades()
+    locacoes_df = get_locacoes()
+
+    if unidades_df.empty or locacoes_df.empty:
+        st.info("Cadastre unidades e locações para visualizar este relatório.")
+    else:
+        # Filtrar unidades com Administração = "Sim"
+        unidades_admin = unidades_df[unidades_df["administracao"] == "Sim"]
+
+        # Merge locações com unidades para obter nome e % administração
+        loc = locacoes_df.merge(
+            unidades_admin[["id", "nome", "administracao", "percentual_administracao"]],
+            left_on="unidade_id", right_on="id", how="left", suffixes=("", "_u")
+        )
+
+        # Converte datas
+        loc["checkin"] = pd.to_datetime(loc["checkin"], errors="coerce").dt.date
+        loc["checkout"] = pd.to_datetime(loc["checkout"], errors="coerce").dt.date
+        loc = loc.dropna(subset=["checkin", "checkout"])
+
+        # ----- Filtros -----
+        anos = sorted(set([d.year for d in loc["checkin"]] + [d.year for d in loc["checkout"]]))
+        col1, col2, col3 = st.columns([1, 1, 2])
+        with col1:
+            ano_sel = st.selectbox("Ano", anos, index=len(anos) - 1)
+        with col2:
+            meses_opts = list(range(1, 12 + 1))
+            mes_sel = st.selectbox("Mês", ["Todos"] + meses_opts, format_func=lambda x: "Todos" if x == "Todos" else f"{x:02}")
+        with col3:
+            unidades_opts = sorted(unidades_admin["nome"].dropna().unique().tolist())
+            unidades_sel = st.multiselect("Unidades", unidades_opts, default=unidades_opts)
+
+        # Período alvo
+        if mes_sel == "Todos":
+            period_start = date(ano_sel, 1, 1)
+            period_end = date(ano_sel, 12, 31)
+            periodo_str = f"{ano_sel}"
+            nome_mes = "Todos"
+        else:
+            last_day = monthrange(ano_sel, mes_sel)[1]
+            period_start = date(ano_sel, mes_sel, 1)
+            period_end = date(ano_sel, mes_sel, last_day)
+            periodo_str = f"{mes_sel:02}/{ano_sel}"
+            nome_mes = f"{mes_sel:02}"
+
+        # Mantém apenas reservas que tocam o período
+        loc_f = loc[(loc["checkin"] <= period_end) & (loc["checkout"] >= period_start)].copy()
+        if unidades_sel:
+            loc_f = loc_f[loc_f["nome"].isin(unidades_sel)]
+
+        if loc_f.empty:
+            st.warning("Não há dados para os filtros selecionados.")
+        else:
+            # ---- Cálculos por reserva (linhas da tabela) ----
+            def noites_no_periodo(ci: date, co: date) -> int:
+                # day-use: checkin >= checkout conta 1 se o checkin cair no período
+                if ci >= co:
+                    return 1 if (period_start <= ci <= period_end) else 0
+                ini = max(ci, period_start)
+                fim = min(co, period_end)
+                return max(0, (fim - ini).days)
+
+            def valor_periodo(row) -> float:
+                ci, co = row["checkin"], row["checkout"]
+                total = float(row.get("valor") or 0.0)
+                total_noites = 1 if ci >= co else max(1, (co - ci).days)
+                v_dia = total / total_noites
+                return v_dia * noites_no_periodo(ci, co)
+
+            def valor_adm(row, v_liquido) -> float:
+                flag = str(row.get("administracao", "Não"))
+                pct = row.get("percentual_administracao", 0.0)
+                try:
+                    pct = float(pct)
+                except Exception:
+                    pct = 0.0
+                if pd.isna(pct):
+                    pct = 0.0
+                return v_liquido * (pct / 100.0) if (flag == "Sim" and pct > 0) else 0.0
+
+            loc_f["Qtde de Noites"] = loc_f.apply(lambda r: noites_no_periodo(r["checkin"], r["checkout"]), axis=1)
+            loc_f["Valor total bruto"] = loc_f.apply(valor_periodo, axis=1)
+            loc_f["Valor total líquido"] = loc_f["Valor total bruto"] * 0.87  # Subtraindo 13%
+            loc_f["Valor administração"] = loc_f.apply(lambda r: valor_adm(r, r["Valor total líquido"]), axis=1)
+
+            # Monta a tabela final
+            tabela = loc_f.rename(columns={
+                "nome": "Unidade",
+                "checkin": "Check-in",
+                "checkout": "Check-out",
+                "plataforma": "Plataforma",
+            })
+            tabela = tabela[["Unidade", "Plataforma", "Check-in", "Check-out", "Qtde de Noites", "Valor total bruto", "Valor total líquido", "Valor administração"]]
+            tabela = tabela.sort_values(["Unidade", "Check-in", "Check-out"]).reset_index(drop=True)
+            # Totais do período
+            tot_noites = int(tabela["Qtde de Noites"].sum())
+            tot_valor_bruto = float(tabela["Valor total bruto"].sum())
+            tot_valor_liquido = float(tabela["Valor total líquido"].sum())
+            tot_adm = float(tabela["Valor administração"].sum())
+            st.caption(f"Totais no período — Noites: {tot_noites} • Valor Bruto: R$ {tot_valor_bruto:,.2f} • Valor Líquido: R$ {tot_valor_liquido:,.2f} • Administração: R$ {tot_adm:,.2f}")
+
+            # Adicionar linha de totais
+            totais = {
+                "Unidade": "Total",
+                "Plataforma": "",
+                "Check-in": "",
+                "Check-out": "",
+                "Qtde de Noites": tabela["Qtde de Noites"].sum(),
+                "Valor total bruto": tabela["Valor total bruto"].sum(),
+                "Valor total líquido": tabela["Valor total líquido"].sum(),
+                "Valor administração": tabela["Valor administração"].sum(),
+            }
+            
+            tabela = pd.concat([tabela, pd.DataFrame([totais])], ignore_index=True)
+
+            # Exibir com formatação monetária
+            tabela_fmt = tabela.copy()
+            tabela_fmt["Valor total bruto"] = tabela_fmt["Valor total bruto"].map(lambda v: f"R$ {v:,.2f}" if pd.notna(v) else "")
+            tabela_fmt["Valor total líquido"] = tabela_fmt["Valor total líquido"].map(lambda v: f"R$ {v:,.2f}" if pd.notna(v) else "")
+            tabela_fmt["Valor administração"] = tabela_fmt["Valor administração"].map(lambda v: f"R$ {v:,.2f}" if pd.notna(v) else "")
+            st.subheader(f"Resumo por Reserva (período: {periodo_str})")
+            st.dataframe(tabela_fmt, use_container_width=True)
+
+           
+            # Exportar CSV (valores numéricos sem formatação)
+            csv = tabela.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
+            st.download_button(
+                label="📥 Baixar Relatório em CSV",
+                data=csv,
+                file_name=f"relatorio_administradora_{ano_sel}_{nome_mes}.csv",
+                mime="text/csv"
+            )
+
+            # --------- Geração de mensagem (WhatsApp / E-mail) ---------
+            st.subheader("Enviar por WhatsApp / E-mail")
+            colw1, colw2, colw3 = st.columns([2, 2, 1])
+            with colw1:
+                phone = st.text_input("Telefone WhatsApp (DDI+DDD+Número, só dígitos)", value="")
+            with colw2:
+                email = st.text_input("E-mail do destinatário", value="")
+            with colw3:
+                detalhar = st.checkbox("Detalhar reservas", value=False, help="Inclui cada linha da tabela na mensagem")
+
+            def br_money(v: float) -> str:
+                return f"R$ {v:,.2f}"
+
+            # Monta a mensagem com base nos dados filtrados
+            linhas = [
+                f"Relatório da Administradora — Período: {periodo_str}",
+                f"Noites: {int(loc_f['Qtde de Noites'].sum())}",
+
+
+                f"Valor total líquido: {br_money(loc_f['Valor total líquido'].sum())}",
+                f"Valor administração: {br_money(loc_f['Valor administração'].sum())}",
+            ]
+
+            if detalhar:
+                linhas.append("")
+                linhas.append("Detalhes por reserva:")
+                for _, r in loc_f.iterrows():
+                    linhas.append(
+                        f"- {r['nome']} | {r['plataforma']} | {r['checkin'].strftime('%d/%m/%Y')}→{r['checkout'].strftime('%d/%m/%Y')} | "
+                        f"Noites: {int(r['Qtde de Noites'])} | Valor bruto: {br_money(r['Valor total bruto'])} | "
+                        f"Valor líquido: {br_money(r['Valor total líquido'])} | Administração: {br_money(r['Valor administração'])}"
+                    )
+
+            msg = "\n".join(linhas)
+
+            cbtn1, cbtn2 = st.columns(2)
+            with cbtn1:
+                if st.button("Gerar WhatsApp"):
+                    if not phone.strip():
+                        st.warning("Informe o telefone (apenas dígitos, com DDI). Ex.: 55XXXXXXXXXXX")
+                    else:
+                        import urllib.parse
+                        link_wa = f"https://wa.me/{phone.strip()}?text={urllib.parse.quote(msg)}"
+                        st.markdown(f"[Abrir WhatsApp ▶️]({link_wa})")
+            with cbtn2:
+                    if not email.strip():
+                        st.warning("Informe o e-mail do destinatário.")
+                    else:
+                        subject = f"Relatório Administradora - {periodo_str}"
+                        mailto = f"mailto:{email.strip()}?subject={urlparse.quote(subject)}&body={urlparse.quote(msg)}"
+                        st.markdown(f"[Abrir cliente de e-mail ✉️]({mailto})")
+
+            # Pré-visualização da mensagem
+            with st.expander("Pré-visualizar mensagem"):
+                st.text(msg)
+
+# ============== RELATÓRIO DE GANHOS ANUAIS ========================
+# ---- Filtros ----
+elif aba == "Relatório de Ganhos Anuais":
+    st.header("Ganhos e Despesas Anuais por Unidade e Ano")
+
+    # Carregar dados
+    unidades_df = get_unidades()
+    locacoes_df = get_locacoes()
+    despesas_df = get_despesas()
+
+    if unidades_df.empty or (locacoes_df.empty and despesas_df.empty):
+        st.info("Cadastre unidades, locações e despesas para visualizar este relatório.")
+    else:
+        # ---------- BASES ----------
+        # Locações + nome da unidade
+        locacoes = locacoes_df.merge(
+            unidades_df, left_on="unidade_id", right_on="id", suffixes=("", "_u")
+        )
+        locacoes["checkin"] = pd.to_datetime(locacoes["checkin"], errors="coerce")
+        locacoes["checkout"] = pd.to_datetime(locacoes["checkout"], errors="coerce")
+        locacoes = locacoes.dropna(subset=["checkin", "checkout"])
+        locacoes["ano"] = locacoes["checkin"].dt.year
+        locacoes["valor"] = locacoes["valor"].fillna(0.0)
+
+        # Despesas + nome da unidade
+        despesas = despesas_df.merge(
+            unidades_df, left_on="unidade_id", right_on="id", suffixes=("", "_u")
+        )
+        despesas["data"] = pd.to_datetime(despesas["data"], errors="coerce")
+        despesas = despesas.dropna(subset=["data"])
+        despesas["ano"] = despesas["data"].dt.year
+        despesas["valor"] = despesas["valor"].fillna(0.0)
+
+        # ---------- FILTROS ----------
+        from datetime import date
+        ano_atual = date.today().year
+        anos_loc = locacoes["ano"].unique().tolist() if not locacoes.empty else []
+        anos_des = despesas["ano"].unique().tolist() if not despesas.empty else []
+        anos = sorted(set(anos_loc + anos_des))
+
+        unidades_opts = sorted(unidades_df["nome"].unique().tolist())
+
+        col1, col2, col3 = st.columns([1, 2, 2])
+        with col1:
+            anos_sel = st.multiselect(
+                "Selecione o(s) Ano(s)",
+                anos,
+                default=[ano_atual] if ano_atual in anos else anos
+            )
+        with col2:
+            meses_opts = list(range(1, 13))
+            meses_sel = st.multiselect(
+                "Selecione o(s) Mês(es)",
+                meses_opts,
+                default=meses_opts,
+                format_func=lambda x: f"{x:02} - {['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'][x-1]}"
+            )
+        with col3:
+            unidades_sel = st.multiselect(
+                "Selecione a(s) Unidade(s)", unidades_opts, default=unidades_opts
+            )
+
+        # ---------- BASE ANUAL (IGNORA MÊS PARA AS SOMAS) ----------
+        loc_base = locacoes[locacoes["ano"].isin(anos_sel)].copy()
+        desp_base = despesas[despesas["ano"].isin(anos_sel)].copy()
+
+        if unidades_sel:
+            loc_base = loc_base[loc_base["nome"].isin(unidades_sel)]
+            desp_base = desp_base[desp_base["nome"].isin(unidades_sel)]
+
+        # Agregações FULL YEAR
+        ganhos_por_unidade_ano = (
+            loc_base.groupby(["nome", "ano"], as_index=False)["valor"]
+            .sum()
+            .rename(columns={"nome": "Unidade", "ano": "Ano", "valor": "Ganhos (R$)"})
+        )
+        despesas_por_unidade_ano = (
+            desp_base.groupby(["nome", "ano"], as_index=False)["valor"]
+            .sum()
+            .rename(columns={"nome": "Unidade", "ano": "Ano", "valor": "Despesas (R$)"})
+        )
+
+        ganhos_despesas = pd.merge(
+            ganhos_por_unidade_ano,
+            despesas_por_unidade_ano,
+            on=["Unidade", "Ano"],
+            how="outer"
+        ).fillna(0.0)
+        ganhos_despesas["Lucro (R$)"] = (
+            ganhos_despesas["Ganhos (R$)"] - ganhos_despesas["Despesas (R$)"]
+        )
+
+        # Pivot anual
+        tabela_pivot = ganhos_despesas.pivot(
+            index="Unidade",
+            columns="Ano",
+            values=["Ganhos (R$)", "Despesas (R$)", "Lucro (R$)"]
+        ).fillna(0.0)
+
+        # Totais por unidade
+        tabela_pivot[("Total por Unidade", "Ganhos (R$)")] = tabela_pivot["Ganhos (R$)"].sum(axis=1)
+        tabela_pivot[("Total por Unidade", "Despesas (R$)")] = tabela_pivot["Despesas (R$)"].sum(axis=1)
+        tabela_pivot[("Total por Unidade", "Lucro (R$)")] = tabela_pivot["Lucro (R$)"].sum(axis=1)
+
+        # Totais gerais por ano
+        totais_gerais = tabela_pivot.sum(axis=0).to_frame().T
+        totais_gerais.index = ["Total Geral"]
+        tabela_pivot = pd.concat([tabela_pivot, totais_gerais])
+
+        st.dataframe(tabela_pivot.style.format("R$ {:,.2f}"), use_container_width=True)
+
+        # ---------- Totais do ano vigente (FULL YEAR do ano atual) ----------
+        locacoes_ano_vigente = locacoes[locacoes["ano"] == ano_atual]
+        despesas_ano_vigente = despesas[despesas["ano"] == ano_atual]
+        ganhos_ano_vigente = locacoes_ano_vigente["valor"].sum()
+        despesas_ano_vigente_val = despesas_ano_vigente["valor"].sum()
+        lucro_ano_vigente = ganhos_ano_vigente - despesas_ano_vigente_val
+
+        st.subheader(f"Totais do Ano Vigente ({ano_atual})")
+        st.metric("Ganhos do Ano", f"R$ {ganhos_ano_vigente:,.2f}")
+        st.metric("Despesas do Ano", f"R$ {despesas_ano_vigente_val:,.2f}")
+        st.metric("Lucro do Ano", f"R$ {lucro_ano_vigente:,.2f}")
+
+        # ---------- (Opcional) Visão por meses (NÃO altera soma anual) ----------
+        if meses_sel and len(meses_sel) < 12:
+            loc_mes = loc_base[loc_base["checkin"].dt.month.isin(meses_sel)].copy()
+            desp_mes = desp_base[desp_base["data"].dt.month.isin(meses_sel)].copy()
+
+            gd_mes = (
+                loc_mes.groupby(["nome", "ano"], as_index=False)["valor"]
+                .sum()
+                .rename(columns={"nome": "Unidade", "ano": "Ano", "valor": "Ganhos (R$)"})
+            )
+            dd_mes = (
+                desp_mes.groupby(["nome", "ano"], as_index=False)["valor"]
+                .sum()
+                .rename(columns={"nome": "Unidade", "ano": "Ano", "valor": "Despesas (R$)"})
+            )
+            vis_mes = pd.merge(gd_mes, dd_mes, on=["Unidade", "Ano"], how="outer").fillna(0.0)
+        
+            
+        else:
+            
+            vis_mes = ganhos_despesas.copy()
+
+        # Gráfico
+        df_long = vis_mes.melt(
+            id_vars=["Unidade", "Ano"],
+            value_vars=["Ganhos (R$)", "Despesas (R$)"],
+            var_name="Tipo",
+            value_name="Valor"
+        )
+        fig = px.bar(
+            df_long,
+            x="Unidade",
+            y="Valor",
+            color="Tipo",
+            facet_col="Ano",
+            barmode="group",
+            labels={"Unidade": "Unidade", "Valor": "Valor (R$)", "Tipo": "Tipo"},
+            title="Ganhos e Despesas por Unidade e Ano (soma ANUAL completa; filtro de mês apenas na visualização)"
+        )
+        fig.update_layout(xaxis_title="Unidade", yaxis_title="Valor (R$)", height=600)
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Exportar CSV
+        csv = tabela_pivot.reset_index().to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
+        st.download_button(
+            label="📥 Baixar Relatório em CSV",
+            data=csv,
+            file_name="ganhos_despesas_anuais_por_unidade.csv",
+            mime="text/csv"
+        )
+
 elif aba == "Despesas":
     st.header("Registro de Despesas")
     unidades = get_unidades()
@@ -1327,258 +1700,39 @@ elif aba == "Sobre o Sistema":
     Versão: **4.0 (mobile)**  
     Aplicação para gestão completa de hospedagens.
     """)
-# # ============== RELATÓRIO PARA ADMINISTRADORA ========================
 
-elif aba == "Administradora":
-    st.header("Relatório para Administradora")
-    
-    # Carregar dados
-    unidades_df = get_unidades()
-    locacoes_df = get_locacoes()
+def keep_awake():
+    import threading
+import time
+import requests
 
-    if unidades_df.empty or locacoes_df.empty:
-        st.info("Cadastre unidades e locações para visualizar este relatório.")
-    else:
-        # Filtrar unidades com Administração = "Sim"
-        unidades_admin = unidades_df[unidades_df["administracao"] == "Sim"]
+def keep_awake(url, interval=600):
+    """
+    Envia solicitações periódicas para a URL da aplicação para evitar hibernação.
 
-        # Merge locações com unidades para obter nome e % administração
-        loc = locacoes_df.merge(
-            unidades_admin[["id", "nome", "administracao", "percentual_administracao"]],
-            left_on="unidade_id", right_on="id", how="left", suffixes=("", "_u")
-        )
+    Args:
+        url (str): URL da aplicação Streamlit.
+        interval (int): Intervalo em segundos entre as solicitações (padrão: 300 segundos = 5 minutos).
+    """
+    def ping():
+        while True:
+            try:
+                requests.get(url)
+                print(f"Ping enviado para {url}")
+            except Exception as e:
+                print(f"Erro ao enviar ping: {e}")
+            time.sleep(interval)
 
-        # Converte datas
-        loc["checkin"] = pd.to_datetime(loc["checkin"], errors="coerce").dt.date
-        loc["checkout"] = pd.to_datetime(loc["checkout"], errors="coerce").dt.date
-        loc = loc.dropna(subset=["checkin", "checkout"])
+    # Inicia o ping em uma thread separada
+    thread = threading.Thread(target=ping, daemon=True)
+    thread.start()
 
-        # ----- Filtros -----
-        anos = sorted(set([d.year for d in loc["checkin"]] + [d.year for d in loc["checkout"]]))
-        col1, col2, col3 = st.columns([1, 1, 2])
-        with col1:
-            ano_sel = st.selectbox("Ano", anos, index=len(anos) - 1)
-        with col2:
-            meses_opts = list(range(1, 12 + 1))
-            mes_sel = st.selectbox("Mês", ["Todos"] + meses_opts, format_func=lambda x: "Todos" if x == "Todos" else f"{x:02}")
-        with col3:
-            unidades_opts = sorted(unidades_admin["nome"].dropna().unique().tolist())
-            unidades_sel = st.multiselect("Unidades", unidades_opts, default=unidades_opts)
+if __name__ == "__main__":
+    # Substitua pela URL pública da sua aplicação
+    app_url = "https://shfmr6ecnttsfoaw3vxex5.streamlit.app/"
+    keep_awake(app_url)
 
-        # Período alvo
-        if mes_sel == "Todos":
-            period_start = date(ano_sel, 1, 1)
-            period_end = date(ano_sel, 12, 31)
-            periodo_str = f"{ano_sel}"
-            nome_mes = "Todos"
-        else:
-            last_day = monthrange(ano_sel, mes_sel)[1]
-            period_start = date(ano_sel, mes_sel, 1)
-            period_end = date(ano_sel, mes_sel, last_day)
-            periodo_str = f"{mes_sel:02}/{ano_sel}"
-            nome_mes = f"{mes_sel:02}"
-
-        # Mantém apenas reservas que tocam o período
-        loc_f = loc[(loc["checkin"] <= period_end) & (loc["checkout"] >= period_start)].copy()
-        if unidades_sel:
-            loc_f = loc_f[loc_f["nome"].isin(unidades_sel)]
-
-        if loc_f.empty:
-            st.warning("Não há dados para os filtros selecionados.")
-        else:
-            # ---- Cálculos por reserva (linhas da tabela) ----
-            def noites_no_periodo(ci: date, co: date) -> int:
-                # day-use: checkin >= checkout conta 1 se o checkin cair no período
-                if ci >= co:
-                    return 1 if (period_start <= ci <= period_end) else 0
-                ini = max(ci, period_start)
-                fim = min(co, period_end)
-                return max(0, (fim - ini).days)
-
-            def valor_periodo(row) -> float:
-                ci, co = row["checkin"], row["checkout"]
-                total = float(row.get("valor") or 0.0)
-                total_noites = 1 if ci >= co else max(1, (co - ci).days)
-                v_dia = total / total_noites
-                return v_dia * noites_no_periodo(ci, co)
-
-            def valor_adm(row, v_liquido) -> float:
-                flag = str(row.get("administracao", "Não"))
-                pct = row.get("percentual_administracao", 0.0)
-                try:
-                    pct = float(pct)
-                except Exception:
-                    pct = 0.0
-                if pd.isna(pct):
-                    pct = 0.0
-                return v_liquido * (pct / 100.0) if (flag == "Sim" and pct > 0) else 0.0
-
-            loc_f["Qtde de Noites"] = loc_f.apply(lambda r: noites_no_periodo(r["checkin"], r["checkout"]), axis=1)
-            loc_f["Valor total bruto"] = loc_f.apply(valor_periodo, axis=1)
-            loc_f["Valor total líquido"] = loc_f["Valor total bruto"] * 0.87  # Subtraindo 13%
-            loc_f["Valor administração"] = loc_f.apply(lambda r: valor_adm(r, r["Valor total líquido"]), axis=1)
-
-            # Monta a tabela final
-            tabela = loc_f.rename(columns={
-                "nome": "Unidade",
-                "checkin": "Check-in",
-                "checkout": "Check-out",
-                "plataforma": "Plataforma",
-            })
-            tabela = tabela[["Unidade", "Plataforma", "Check-in", "Check-out", "Qtde de Noites", "Valor total bruto", "Valor total líquido", "Valor administração"]]
-            tabela = tabela.sort_values(["Unidade", "Check-in", "Check-out"]).reset_index(drop=True)
-            # Totais do período
-            tot_noites = int(tabela["Qtde de Noites"].sum())
-            tot_valor_bruto = float(tabela["Valor total bruto"].sum())
-            tot_valor_liquido = float(tabela["Valor total líquido"].sum())
-            tot_adm = float(tabela["Valor administração"].sum())
-            st.caption(f"Totais no período — Noites: {tot_noites} • Valor Bruto: R$ {tot_valor_bruto:,.2f} • Valor Líquido: R$ {tot_valor_liquido:,.2f} • Administração: R$ {tot_adm:,.2f}")
-
-            # Adicionar linha de totais
-            totais = {
-                "Unidade": "Total",
-                "Plataforma": "",
-                "Check-in": "",
-                "Check-out": "",
-                "Qtde de Noites": tabela["Qtde de Noites"].sum(),
-                "Valor total bruto": tabela["Valor total bruto"].sum(),
-                "Valor total líquido": tabela["Valor total líquido"].sum(),
-                "Valor administração": tabela["Valor administração"].sum(),
-            }
-            
-            tabela = pd.concat([tabela, pd.DataFrame([totais])], ignore_index=True)
-
-            # Exibir com formatação monetária
-            tabela_fmt = tabela.copy()
-            tabela_fmt["Valor total bruto"] = tabela_fmt["Valor total bruto"].map(lambda v: f"R$ {v:,.2f}" if pd.notna(v) else "")
-            tabela_fmt["Valor total líquido"] = tabela_fmt["Valor total líquido"].map(lambda v: f"R$ {v:,.2f}" if pd.notna(v) else "")
-            tabela_fmt["Valor administração"] = tabela_fmt["Valor administração"].map(lambda v: f"R$ {v:,.2f}" if pd.notna(v) else "")
-            st.subheader(f"Resumo por Reserva (período: {periodo_str})")
-            st.dataframe(tabela_fmt, use_container_width=True)
-
-           
-            # Exportar CSV (valores numéricos sem formatação)
-            csv = tabela.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
-            st.download_button(
-                label="📥 Baixar Relatório em CSV",
-                data=csv,
-                file_name=f"relatorio_administradora_{ano_sel}_{nome_mes}.csv",
-                mime="text/csv"
-            )
-
-            # --------- Geração de mensagem (WhatsApp / E-mail) ---------
-            st.subheader("Enviar por WhatsApp / E-mail")
-            colw1, colw2, colw3 = st.columns([2, 2, 1])
-            with colw1:
-                phone = st.text_input("Telefone WhatsApp (DDI+DDD+Número, só dígitos)", value="")
-            with colw2:
-                email = st.text_input("E-mail do destinatário", value="")
-            with colw3:
-                detalhar = st.checkbox("Detalhar reservas", value=False, help="Inclui cada linha da tabela na mensagem")
-
-            def br_money(v: float) -> str:
-                return f"R$ {v:,.2f}"
-
-            # Monta a mensagem com base nos dados filtrados
-            linhas = [
-                f"Relatório da Administradora — Período: {periodo_str}",
-                f"Noites: {int(loc_f['Qtde de Noites'].sum())}",
-                f"Valor total bruto: {br_money(loc_f['Valor total bruto'].sum())}",
-                f"Valor total líquido: {br_money(loc_f['Valor total líquido'].sum())}",
-                f"Valor administração: {br_money(loc_f['Valor administração'].sum())}",
-            ]
-
-            if detalhar:
-                linhas.append("")
-                linhas.append("Detalhes por reserva:")
-                for _, r in loc_f.iterrows():
-                    linhas.append(
-                        f"- {r['nome']} | {r['plataforma']} | {r['checkin'].strftime('%d/%m/%Y')}→{r['checkout'].strftime('%d/%m/%Y')} | "
-                        f"Noites: {int(r['Qtde de Noites'])} | Valor bruto: {br_money(r['Valor total bruto'])} | "
-                        f"Valor líquido: {br_money(r['Valor total líquido'])} | Administração: {br_money(r['Valor administração'])}"
-                    )
-
-            msg = "\n".join(linhas)
-
-            cbtn1, cbtn2 = st.columns(2)
-            with cbtn1:
-                if st.button("Gerar WhatsApp"):
-                    if not phone.strip():
-                        st.warning("Informe o telefone (apenas dígitos, com DDI). Ex.: 55XXXXXXXXXXX")
-                    else:
-                        import urllib.parse
-                        link_wa = f"https://wa.me/{phone.strip()}?text={urllib.parse.quote(msg)}"
-                        st.markdown(f"[Abrir WhatsApp ▶️]({link_wa})")
-            with cbtn2:
-                    if not email.strip():
-                        st.warning("Informe o e-mail do destinatário.")
-                    else:
-                        subject = f"Relatório Administradora - {periodo_str}"
-                        mailto = f"mailto:{email.strip()}?subject={urlparse.quote(subject)}&body={urlparse.quote(msg)}"
-                        st.markdown(f"[Abrir cliente de e-mail ✉️]({mailto})")
-
-            # Pré-visualização da mensagem
-            with st.expander("Pré-visualizar mensagem"):
-                st.text(msg)
-
-# ============== RELATÓRIO DE GANHOS ANUAIS ========================
-elif aba == "Relatório de Ganhos Anuais":
-    st.header("Ganhos Anuais por Unidade e Ano")
-
-    # Carregar dados
-    unidades_df = get_unidades()
-    locacoes_df = get_locacoes()
-
-    if unidades_df.empty or locacoes_df.empty:
-        st.info("Cadastre unidades e locações para visualizar este relatório.")
-    else:
-        # Merge locações com unidades para obter o nome da unidade
-        locacoes = locacoes_df.merge(unidades_df, left_on="unidade_id", right_on="id", suffixes=("", "_unidade"))
-
-        # Converte datas
-        locacoes["checkin"] = pd.to_datetime(locacoes["checkin"], errors="coerce")
-        locacoes["checkout"] = pd.to_datetime(locacoes["checkout"], errors="coerce")
-        locacoes = locacoes.dropna(subset=["checkin", "checkout"])
-
-        # Adicionar colunas de ano e valor total
-        locacoes["ano"] = locacoes["checkin"].dt.year
-        locacoes["valor"] = locacoes["valor"].fillna(0.0)
-
-        # Agregar ganhos por unidade e ano
-        ganhos_por_unidade_ano = locacoes.groupby(["nome", "ano"])["valor"].sum().reset_index()
-        ganhos_por_unidade_ano = ganhos_por_unidade_ano.rename(columns={"nome": "Unidade", "ano": "Ano", "valor": "Ganhos (R$)"})
-
-        # Pivotar a tabela para exibir anos como colunas
-        tabela_pivot = ganhos_por_unidade_ano.pivot(index="Unidade", columns="Ano", values="Ganhos (R$)").fillna(0.0)
-
-        # Adicionar totais por unidade e por ano
-        tabela_pivot["Total por Unidade"] = tabela_pivot.sum(axis=1)  # Total por unidade (linha)
-        tabela_pivot.loc["Total por Ano"] = tabela_pivot.sum(axis=0)  # Total por ano (coluna)
-
-        # Exibir tabela
-        #st.subheader("Ganhos Anuais por Unidade e Ano (com Totais)")
-        st.dataframe(tabela_pivot.style.format("R$ {:,.2f}"), use_container_width=True)
-
-        # Gráfico de barras empilhadas
-        fig = px.bar(
-            ganhos_por_unidade_ano,
-            x="Unidade",
-            y="Ganhos (R$)",
-            color="Ano",
-            barmode="stack",
-            labels={"Unidade": "Unidade", "Ganhos (R$)": "Ganhos (R$)", "Ano": "Ano"},
-            title="Ganhos Anuais por Unidade e Ano"
-        )
-        fig.update_layout(xaxis_title="Unidade", yaxis_title="Ganhos (R$)", height=600)
-        st.plotly_chart(fig, use_container_width=True)
-
-        # Exportar para CSV
-        csv = tabela_pivot.reset_index().to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
-        st.download_button(
-            label="📥 Baixar Relatório em CSV",
-            data=csv,
-            file_name="ganhos_anuais_por_unidade.csv",
-            mime="text/csv"
-        )
+    # Inicia a aplicação Streamlit
+    #st.title("Minha Aplicação Streamlit")
 
 
