@@ -1026,9 +1026,10 @@ elif aba == "Relatório de Ganhos Anuais":
             unidades_df, left_on="unidade_id", right_on="id", suffixes=("", "_u")
         )
         locacoes["checkin"] = pd.to_datetime(locacoes["checkin"], errors="coerce")
-        locacoes["checkout"] = pd.to_datetime(locacoes["checkout"], errors="coerce")
+        locacoes["checkout"] = pd.to_datetime(loc["checkout"], errors="coerce")
         locacoes = locacoes.dropna(subset=["checkin", "checkout"])
         locacoes["ano"] = locacoes["checkin"].dt.year
+        locacoes["mes"] = locacoes["checkin"].dt.month
         locacoes["valor"] = locacoes["valor"].fillna(0.0)
 
         # Despesas + nome da unidade
@@ -1038,10 +1039,10 @@ elif aba == "Relatório de Ganhos Anuais":
         despesas["data"] = pd.to_datetime(despesas["data"], errors="coerce")
         despesas = despesas.dropna(subset=["data"])
         despesas["ano"] = despesas["data"].dt.year
+        despesas["mes"] = despesas["data"].dt.month
         despesas["valor"] = despesas["valor"].fillna(0.0)
 
         # ---------- FILTROS ----------
-        from datetime import date
         ano_atual = date.today().year
         anos_loc = locacoes["ano"].unique().tolist() if not locacoes.empty else []
         anos_des = despesas["ano"].unique().tolist() if not despesas.empty else []
@@ -1060,24 +1061,34 @@ elif aba == "Relatório de Ganhos Anuais":
             meses_opts = list(range(1, 13))
             meses_sel = st.multiselect(
                 "Selecione o(s) Mês(es)",
-                meses_opts,
-                default=meses_opts,
-                format_func=lambda x: f"{x:02} - {['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'][x-1]}"
+                ["Todos"] + meses_opts,
+                default=["Todos"],
+                format_func=lambda x: "Todos os Meses" if x == "Todos" else f"{x:02} - {['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'][x-1]}"
             )
         with col3:
             unidades_sel = st.multiselect(
                 "Selecione a(s) Unidade(s)", unidades_opts, default=unidades_opts
             )
 
-        # ---------- BASE ANUAL (IGNORA MÊS PARA AS SOMAS) ----------
-        loc_base = locacoes[locacoes["ano"].isin(anos_sel)].copy()
-        desp_base = despesas[despesas["ano"].isin(anos_sel)].copy()
+        # Aplicar filtro de meses
+        if "Todos" in meses_sel:
+            meses_filtrados = list(range(1, 13))  # Todos os meses
+        else:
+            meses_filtrados = meses_sel
+
+        # ---------- BASE ANUAL (FILTRADA POR ANO E MÊS) ----------
+        loc_base = locacoes[
+            (locacoes["ano"].isin(anos_sel)) & (locacoes["mes"].isin(meses_filtrados))
+        ].copy()
+        desp_base = despesas[
+            (despesas["ano"].isin(anos_sel)) & (despesas["mes"].isin(meses_filtrados))
+        ].copy()
 
         if unidades_sel:
             loc_base = loc_base[loc_base["nome"].isin(unidades_sel)]
             desp_base = desp_base[desp_base["nome"].isin(unidades_sel)]
 
-        # Agregações FULL YEAR
+        # Agregações por ano e unidade
         ganhos_por_unidade_ano = (
             loc_base.groupby(["nome", "ano"], as_index=False)["valor"]
             .sum()
@@ -1118,9 +1129,13 @@ elif aba == "Relatório de Ganhos Anuais":
 
         st.dataframe(tabela_pivot.style.format("R$ {:,.2f}"), use_container_width=True)
 
-        # ---------- Totais do ano vigente (FULL YEAR do ano atual) ----------
-        locacoes_ano_vigente = locacoes[locacoes["ano"] == ano_atual]
-        despesas_ano_vigente = despesas[despesas["ano"] == ano_atual]
+        # ---------- Totais do ano vigente (FILTRADO POR MÊS) ----------
+        locacoes_ano_vigente = locacoes[
+            (locacoes["ano"] == ano_atual) & (locacoes["mes"].isin(meses_filtrados))
+        ]
+        despesas_ano_vigente = despesas[
+            (despesas["ano"] == ano_atual) & (despesas["mes"].isin(meses_filtrados))
+        ]
         ganhos_ano_vigente = locacoes_ano_vigente["valor"].sum()
         despesas_ano_vigente_val = despesas_ano_vigente["valor"].sum()
         lucro_ano_vigente = ganhos_ano_vigente - despesas_ano_vigente_val
