@@ -903,6 +903,7 @@ elif aba == "Administradora":
                     pct = 0.0
                 if pd.isna(pct):
                     pct = 0.0
+
                 return v_liquido * (pct / 100.0) if (flag == "Sim" and pct > 0) else 0.0
 
             loc_f["Qtde de Noites"] = loc_f.apply(lambda r: noites_no_periodo(r["checkin"], r["checkout"]), axis=1)
@@ -1032,7 +1033,7 @@ elif aba == "Relatório de Ganhos Anuais":
             unidades_df, left_on="unidade_id", right_on="id", suffixes=("", "_u")
         )
         locacoes["checkin"] = pd.to_datetime(locacoes["checkin"], errors="coerce")
-        locacoes["checkout"] = pd.to_datetime(loc["checkout"], errors="coerce")
+        locacoes["checkout"] = pd.to_datetime(locacoes["checkout"], errors="coerce")
         locacoes = locacoes.dropna(subset=["checkin", "checkout"])
         locacoes["ano"] = locacoes["checkin"].dt.year
         locacoes["mes"] = locacoes["checkin"].dt.month
@@ -1082,12 +1083,19 @@ elif aba == "Relatório de Ganhos Anuais":
         else:
             meses_filtrados = meses_sel
 
-        # ---------- BASE ANUAL (FILTRADA POR ANO E MÊS) ----------
+        # ---------- BASE ANUAL (FILTRADA POR ANO, MÊS E DATAS FUTURAS) ----------
+        hoje = date.today()  # Data atual
+
+        # Filtrar locações para incluir registros futuros
         loc_base = locacoes[
-            (locacoes["ano"].isin(anos_sel)) & (locacoes["mes"].isin(meses_filtrados))
+            ((locacoes["ano"].isin(anos_sel)) & (locacoes["mes"].isin(meses_filtrados))) |
+            (locacoes["checkin"].dt.date >= hoje)  # Inclui registros com check-in futuro
         ].copy()
+
+        # Filtrar despesas para incluir registros futuros
         desp_base = despesas[
-            (despesas["ano"].isin(anos_sel)) & (despesas["mes"].isin(meses_filtrados))
+            ((despesas["ano"].isin(anos_sel)) & (despesas["mes"].isin(meses_filtrados))) |
+            (despesas["data"].dt.date >= hoje)  # Inclui registros com data futura
         ].copy()
 
         if unidades_sel:
