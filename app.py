@@ -379,8 +379,12 @@ if aba == "Dashboard de Ocupação":
         # Filtro de unidades (adiciona multiselect)
         unidades_opts = sorted(unidades_dash["nome"].unique().tolist())
         unidades_sel = st.multiselect("Unidades", unidades_opts, default=unidades_opts)
+
         # Filtra unidades selecionadas
-        unidades_dash_filtrado = unidades_dash[unidades_dash["nome"].isin(unidades_sel)] if unidades_sel else unidades_dash
+        if unidades_sel:
+            unidades_ids_sel = unidades_dash[unidades_dash["nome"].isin(unidades_sel)]["id"].tolist()
+            locacoes_dash = locacoes_dash[locacoes_dash["unidade_id"].isin(unidades_ids_sel)]
+            despesas_dash = despesas_dash[despesas_dash["unidade_id"].isin(unidades_ids_sel)]
 
     # ====== Cards Mobile (resumo) ======
     if MOBILE is not None:
@@ -436,7 +440,9 @@ if aba == "Dashboard de Ocupação":
         dias_periodo = pd.date_range(start=data_inicio, end=data_fim, freq="D")[::-1]
         dias_str = [d.strftime("%d/%m") for d in dias_periodo]
 
-        # NÃO adiciona "Administração" como linha de unidade
+        # Filtra unidades para tabela (NÃO adiciona "Administração" como linha de unidade)
+        unidades_dash_filtrado = unidades_dash[unidades_dash["nome"].isin(unidades_sel)] if unidades_sel else unidades_dash
+
         index_nomes = (
             unidades_dash_filtrado["nome"].tolist() if not unidades_dash_filtrado.empty else []
         ) + ["Total R$"]
