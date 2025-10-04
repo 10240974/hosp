@@ -847,7 +847,8 @@ elif aba == "Administradora":
 
         # ----- Filtros -----
         anos = sorted(set([d.year for d in loc["checkin"]] + [d.year for d in loc["checkout"]]))
-        col1, col2, col3 = st.columns([1, 1, 2])
+        plataformas_disponiveis = sorted(loc["plataforma"].dropna().unique())  # Plataformas disponíveis
+        col1, col2, col3, col4 = st.columns([1, 1, 2, 2])
         with col1:
             ano_sel = st.selectbox("Ano", anos, index=len(anos) - 1)
         with col2:
@@ -856,6 +857,8 @@ elif aba == "Administradora":
         with col3:
             unidades_opts = sorted(unidades_admin["nome"].dropna().unique().tolist())
             unidades_sel = st.multiselect("Unidades", unidades_opts, default=unidades_opts)
+        with col4:
+            plataformas_sel = st.multiselect("Plataformas", ["Todas"] + plataformas_disponiveis, default=["Todas"])
 
         # Período alvo
         if mes_sel == "Todos":
@@ -870,10 +873,14 @@ elif aba == "Administradora":
             periodo_str = f"{mes_sel:02}/{ano_sel}"
             nome_mes = f"{mes_sel:02}"
 
-        # Mantém apenas reservas que tocam o período
-        loc_f = loc[(loc["checkin"] <= period_end) & (loc["checkout"] >= period_start)].copy()
+        # Mantém apenas reservas cujo checkout está no período selecionado
+        loc_f = loc[(loc["checkout"] >= period_start) & (loc["checkout"] <= period_end)].copy()
+
+        # Aplicar filtros adicionais
         if unidades_sel:
             loc_f = loc_f[loc_f["nome"].isin(unidades_sel)]
+        if "Todas" not in plataformas_sel:
+            loc_f = loc_f[loc_f["plataforma"].isin(plataformas_sel)]
 
         if loc_f.empty:
             st.warning("Não há dados para os filtros selecionados.")
@@ -917,9 +924,14 @@ elif aba == "Administradora":
                 "checkin": "Check-in",
                 "checkout": "Check-out",
                 "plataforma": "Plataforma",
+                "hospede": "Hóspede"
             })
-            tabela = tabela[["Unidade", "Plataforma", "Check-in", "Check-out", "Qtde de Noites", "Valor total bruto", "Valor total líquido", "Valor administração"]]
+            tabela = tabela[[
+                "Unidade", "Hóspede", "Plataforma", "Check-in", "Check-out",
+                "Qtde de Noites", "Valor total bruto", "Valor total líquido", "Valor administração"
+            ]]
             tabela = tabela.sort_values(["Unidade", "Check-in", "Check-out"]).reset_index(drop=True)
+
             # Totais do período
             tot_noites = int(tabela["Qtde de Noites"].sum())
             tot_valor_bruto = float(tabela["Valor total bruto"].sum())
@@ -930,6 +942,7 @@ elif aba == "Administradora":
             # Adicionar linha de totais
             totais = {
                 "Unidade": "Total",
+                "Hóspede": "",
                 "Plataforma": "",
                 "Check-in": "",
                 "Check-out": "",
@@ -938,7 +951,6 @@ elif aba == "Administradora":
                 "Valor total líquido": tabela["Valor total líquido"].sum(),
                 "Valor administração": tabela["Valor administração"].sum(),
             }
-            
             tabela = pd.concat([tabela, pd.DataFrame([totais])], ignore_index=True)
 
             # Exibir com formatação monetária
@@ -948,15 +960,6 @@ elif aba == "Administradora":
             tabela_fmt["Valor administração"] = tabela_fmt["Valor administração"].map(lambda v: f"R$ {v:,.2f}" if pd.notna(v) else "")
             st.subheader(f"Resumo por Reserva (período: {periodo_str})")
             st.dataframe(tabela_fmt, use_container_width=True)
-
-            # Exportar CSV (valores numéricos sem formatação)
-            csv = tabela.to_csv(index=False, sep=";", encoding="utf-8-sig").encode("utf-8-sig")
-            st.download_button(
-                label="📥 Baixar Relatório em CSV",
-                data=csv,
-                file_name=f"relatorio_administradora_{ano_sel}_{nome_mes}.csv",
-                mime="text/csv"
-            )
 
             # --------- Geração de mensagem (WhatsApp / E-mail) ---------
             st.subheader("Enviar por WhatsApp / E-mail")
@@ -1033,7 +1036,7 @@ elif aba == "Relatório de Ganhos Anuais":
             unidades_df, left_on="unidade_id", right_on="id", suffixes=("", "_u")
         )
         locacoes["checkin"] = pd.to_datetime(locacoes["checkin"], errors="coerce")
-        locacoes["checkout"] = pd.to_datetime(locacoes["checkout"], errors="coerce")
+        locacoes["checkout"] = pd.to_datetime(loc["checkout"], errors="coerce")
         locacoes = locacoes.dropna(subset=["checkin", "checkout"])
         locacoes["ano"] = locacoes["checkin"].dt.year
         locacoes["mes"] = locacoes["checkin"].dt.month
@@ -1426,39 +1429,62 @@ elif aba == "Locações":
     # ------ Listagem / Edição / Exclusão ------
     st.subheader("Locações Registradas")
 
-    if MOBILE:
-        unidade_loca_filtro = st.selectbox("Unidade", ["Todas"] + (unidades["nome"].tolist() if not unidades.empty else []))
-        mes_loca_filtro = st.selectbox("Mês de check-in", ["Todos"] + [str(m).zfill(2) for m in range(1,13)])
-    else:
-        unidades_lista = ["Todas"] + (unidades["nome"].tolist() if not unidades.empty else [])
-        unidade_loca_filtro = st.selectbox("Filtrar por unidade", unidades_lista, key="locacoes_unidade_filtro")
-        mes_loca_filtro = st.selectbox("Filtrar por mês de check-in", ["Todos"] + [str(m).zfill(2) for m in range(1,13)], key="locacoes_mes_filtro")
+    # Obter o ano e o mês corrente
+    ano_corrente = date.today().year
+    mes_corrente = date.today().month
 
+    # Carregar locações antes de usar
     locacoes = get_locacoes()
+
+    # Adicionar filtros de ano, mês e unidades
+    anos_disponiveis = sorted(locacoes["checkout"].apply(lambda x: pd.to_datetime(x).year).unique())
+    ano_loca_filtro = st.selectbox("Filtrar por ano", ["Todos"] + anos_disponiveis, index=anos_disponiveis.index(ano_corrente) + 1)
+    mes_loca_filtro = st.selectbox(
+        "Filtrar por mês de check-out",
+        ["Todos"] + [str(m).zfill(2) for m in range(1, 13)],
+        index=mes_corrente if "Todos" not in ["Todos"] else 0
+    )
+
+    # Adicionar filtro de unidades
+    unidades = get_unidades()
+    unidades_opcoes = unidades["nome"].tolist() if not unidades.empty else []
+    unidades_filtro = st.multiselect("Filtrar por unidades", ["Todas"] + unidades_opcoes, default=["Todas"])
+
+    # Aplicar os filtros
     if not locacoes.empty and not unidades.empty:
         locacoes = locacoes.merge(unidades, left_on="unidade_id", right_on="id", suffixes=("", "_unidade"))
-        if unidade_loca_filtro != "Todas":
-            locacoes = locacoes[locacoes["nome"] == unidade_loca_filtro]
+        if ano_loca_filtro != "Todos":
+            locacoes = locacoes[pd.to_datetime(locacoes["checkout"]).dt.year == int(ano_loca_filtro)]
         if mes_loca_filtro != "Todos":
-            locacoes = locacoes[pd.to_datetime(locacoes["checkin"]).dt.month == int(mes_loca_filtro)]
+            locacoes = locacoes[pd.to_datetime(locacoes["checkout"]).dt.month == int(mes_loca_filtro)]
+        if "Todas" not in unidades_filtro:
+            locacoes = locacoes[locacoes["nome"].isin(unidades_filtro)]
+
+        if not locacoes.empty:
+            # Calcular o total da coluna "valor"
+            total_valor = locacoes["valor"].sum()
+
+            # Adicionar uma linha de total ao DataFrame
+            total_row = {
+                "id": "Total",
+                "nome": "",
+                "checkin": "",
+                "checkout": "",
+                "hospede": "",
+                "valor": total_valor,
+                "plataforma": "",
+                "status_pagamento": ""
+            }
+            locacoes = pd.concat([locacoes, pd.DataFrame([total_row])], ignore_index=True)
 
         if MOBILE:
             if locacoes.empty:
                 st.info("Sem registros para os filtros.")
             else:
-                for _, r in locacoes.sort_values("checkin").iterrows():
-                    render_locacao_card(r)
-            with st.expander("Excluir locação"):
-                if not locacoes.empty:
-                    id_excluir = st.selectbox("Selecione o ID", locacoes["id"])
-                    if st.button("Excluir", type="primary", use_container_width=True):
-                        conn = conectar()
-                        conn.execute("DELETE FROM locacoes WHERE id=?", (int(id_excluir),))
-                        conn.commit(); conn.close()
-                        st.success(f"Locação {id_excluir} excluída! Atualize a página.")
+                st.dataframe(locacoes[["id", "nome", "checkin", "checkout", "hospede", "valor", "plataforma", "status_pagamento"]], use_container_width=True)
         else:
             edited_df = st.data_editor(
-                locacoes[["id","nome","checkin","checkout","hospede","valor","plataforma","status_pagamento"]],
+                locacoes[["id", "nome", "checkin", "checkout", "hospede", "valor", "plataforma", "status_pagamento"]],
                 num_rows="dynamic", use_container_width=True, key="editor_locacoes"
             )
             if st.button("Salvar Alterações nas Locações"):
@@ -1479,14 +1505,16 @@ elif aba == "Locações":
             st.subheader("Excluir Locação")
             id_excluir = st.selectbox("Selecione o ID da locação para excluir", locacoes["id"])
             if st.button("Excluir Locação"):
-                conn = conectar(); conn.execute("DELETE FROM locacoes WHERE id=?", (int(id_excluir),))
-                conn.commit(); conn.close()
+                conn = conectar()
+                conn.execute("DELETE FROM locacoes WHERE id=?", (int(id_excluir),))
+                conn.commit()
+                conn.close()
                 st.success(f"Locação {id_excluir} excluída!")
-    else:
-        st.info("Cadastre unidades e locações para visualizar e editar aqui.")
+else:
+    st.info("Cadastre unidades e locações para visualizar e editar aqui.")
 
 # ============== DESPESAS ============================
-elif aba == "Despesas":
+if aba == "Despesas":
     st.header("Registro de Despesas")
     unidades = get_unidades()
 
@@ -1511,7 +1539,7 @@ elif aba == "Despesas":
     st.subheader("Despesas Registradas")
     despesas = get_despesas()
     if not despesas.empty and not unidades.empty:
-        despesas = despesas.merge(unidades, left_on="unidade_id", right_on="id", suffixes=("", "_unidade"))
+        despesas = despesas.merge(unidades, left_on="unidade_id", right_on="id", suffixes=("", "_u"))
 
         unidades_opcoes = unidades["nome"].tolist()
         unidade_filtro = st.selectbox("Filtrar por unidade", ["Todas"] + unidades_opcoes, key="despesa_unidade_filtro")
@@ -1694,7 +1722,7 @@ elif aba == "Precificação":
     st.subheader("Preços Base Cadastrados")
     precos = get_precos()
     if not precos.empty and not unidades.empty:
-        precos = precos.merge(unidades, left_on="unidade_id", right_on="id", suffixes=("", "_unidade"))
+        precos = precos.merge(unidades, left_on="unidade_id", right_on="id", suffixes=("", "_u"))
         st.dataframe(precos[["nome", "temporada", "preco_base"]], use_container_width=True)
     else:
         st.info("Cadastre unidades e preços para visualizar aqui.")
@@ -1724,29 +1752,6 @@ elif aba == "Sobre o Sistema":
     Aplicação para gestão completa de hospedagens.
     """)
 
-# ============== KEEP AWAKE ==========================
-def keep_awake(url, interval=600):
-    """
-    Envia solicitações periódicas para a URL da aplicação para evitar hibernação.
 
-    Args:
-        url (str): URL da aplicação Streamlit.
-        interval (int): Intervalo em segundos entre as solicitações (padrão: 600s = 10 min).
-    """
-    def ping():
-        while True:
-            try:
-                requests.get(url)
-                print(f"Ping enviado para {url}")
-            except Exception as e:
-                print(f"Erro ao enviar ping: {e}")
-            time.sleep(interval)
 
-    # Inicia o ping em uma thread separada
-    thread = threading.Thread(target=ping, daemon=True)
-    thread.start()
 
-if __name__ == "__main__":
-    # Substitua pela URL pública da sua aplicação
-    app_url = "https://shfmr6ecnttsfoaw3vxex5.streamlit.app/"
-    keep_awake(app_url)
