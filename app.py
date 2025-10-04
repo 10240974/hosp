@@ -932,7 +932,7 @@ elif aba == "Administradora":
             ]]
             tabela = tabela.sort_values(["Unidade", "Check-in", "Check-out"]).reset_index(drop=True)
 
-            # Totais do período teste do alex
+            # Totais do período 
             tot_noites = int(tabela["Qtde de Noites"].sum())
             tot_valor_bruto = float(tabela["Valor total bruto"].sum())
             tot_valor_liquido = float(tabela["Valor total líquido"].sum())
