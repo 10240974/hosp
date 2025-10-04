@@ -315,7 +315,7 @@ if aba == "Dashboard de Ocupação":
     st.markdown(
         """
         <h2 style="font-size:24px; color:black; font-weight:400; margin-bottom:1rem;">
-            🏠 Ocupação - Visão Geral
+            🏠 Ocupação - Visão Geral  - Versão 03/10/2025
         </h2>
         """,
         unsafe_allow_html=True
