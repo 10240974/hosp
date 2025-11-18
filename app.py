@@ -17,7 +17,7 @@ import urllib.parse  # ADICIONADO: usado para montar mailto/whatsapp
 
 # ============== CONFIGURAÇÃO DA PÁGINA ==============
 # Configuração da página para abrir com menu lateral fechado
-st.set_page_config(page_title="Hospedar", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Hospedar", layout="wide", initial_sidebar_state="collapsed")
 
 # Adicionar estilo para reduzir o espaçamento no topo
 st.markdown(
@@ -315,7 +315,7 @@ if aba == "Dashboard de Ocupação":
     st.markdown(
         """
         <h2 style="font-size:24px; color:black; font-weight:400; margin-bottom:1rem;">
-            🏠 Ocupação - Visão Geral  -  ALEX
+            🏠 Ocupação - Visão Geral  -  ALEX  Versão 17/11/2025
         </h2>
         """,
         unsafe_allow_html=True
