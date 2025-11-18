@@ -17,7 +17,7 @@ import urllib.parse  # ADICIONADO: usado para montar mailto/whatsapp
 
 # ============== CONFIGURAÇÃO DA PÁGINA ==============
 # Configuração da página para abrir com menu lateral fechado
-st.set_page_config(page_title="Hospedar", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Hospedar", layout="wide", initial_sidebar_state="expanded")
 
 # Adicionar estilo para reduzir o espaçamento no topo
 st.markdown(
@@ -355,8 +355,8 @@ if aba == "Dashboard de Ocupação":
             data_fim = date(ano_sel, 12, 31)  # Último dia do ano
         else:
             data_inicio = date(ano_sel, mes_sel, 1)  # Primeiro dia do mês selecionado
-            ultimo_dia = monthrange(ano_sel, mes_sel)[1]  # Último dia do mês selecionado
-            data_fim = date(ano_sel, mes_sel, ultimo_dia)
+            ultimo_dia = monthrange(ano_sel, mes_sel)[1]  # Último dia do
+            data_fim = date(ano_sel, mes_sel, ultimo_dia)  # Último dia do mês selecionado
 
         # Filtrar locações e despesas pelo ano e mês selecionados
         if  mes_sel == "Todos":
@@ -681,40 +681,47 @@ elif aba == "Relatório de Despesas":
 
         # ---- Filtros ----
         anos = sorted(des["ano"].unique())
-        c1, c2 = st.columns([1, 3])
+        c1, c2, c3 = st.columns([1, 1, 2])
         with c1:
             ano_sel = st.selectbox("Ano", anos, index=len(anos) - 1)
         with c2:
+            meses_lista = ["Todos"] + [str(m).zfill(2) for m in range(1, 13)]
+            mes_sel = st.selectbox(
+                "Mês",
+                meses_lista,
+                index=0,
+                format_func=lambda x: "Todos" if x == "Todos" else f"{x} - {['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'][int(x)-1]}"
+            )
+        with c3:
             tipos_opts = sorted(des["tipo"].dropna().unique()) if "tipo" in des.columns else []
             tipo_sel = st.multiselect("Tipo de Despesa", tipos_opts, default=tipos_opts)
 
         # Aplicar filtros
         df_f = des[des["ano"] == ano_sel].copy()
+        if mes_sel != "Todos":
+            df_f = df_f[pd.to_datetime(df_f["data"]).dt.month == int(mes_sel)]
         if tipo_sel:
             df_f = df_f[df_f["tipo"].isin(tipo_sel)]
 
-        # Agregar por mês e tipo
-        agg_df = df_f.groupby(["nome_mes", "tipo"], as_index=False)["valor"].sum()
+        # Tabela dinâmica (agregada por mês e tipo)
+        tabela_agg = df_f.groupby(["nome_mes", "tipo"], as_index=False)["valor"].sum()
+        tabela_agg = tabela_agg.pivot_table(index="nome_mes", columns="tipo", values="valor", fill_value=0)
 
-        if agg_df.empty:
-            st.warning("Não há despesas para os filtros selecionados.")
-        else:
-            # Gráfico de barras
-            fig = px.bar(
-                agg_df,
-                x="nome_mes",
-                y="valor",
-                color="tipo",
-                category_orders={"nome_mes": ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"]},
-                labels={"valor": "Valor (R$)", "nome_mes": "Mês", "tipo": "Tipo de Despesa"},
-                title=f"Despesas por Mês e Tipo - {ano_sel}"
-            )
-            fig.update_layout(barmode="stack", height=600)
-            st.plotly_chart(fig, use_container_width=True)
+        # Gráfico de barras empilhadas
+        fig = px.bar(
+            tabela_agg,
+            x=tabela_agg.index,
+            y=tabela_agg.columns,
+            labels={"value": "Valor (R$)", "nome_mes": "Mês", "tipo": "Tipo de Despesa"},
+            title=f"Despesas por Mês e Tipo - {ano_sel}",
+            text_auto=True
+        )
+        fig.update_layout(barmode="stack", xaxis_title="Mês", yaxis_title="Valor (R$)")
+        st.plotly_chart(fig, use_container_width=True)
 
-            # Mostrar tabela
-            with st.expander("Ver tabela detalhada"):
-                st.dataframe(agg_df, use_container_width=True)
+        # Mostrar tabela detalhada
+        with st.expander("Ver tabela detalhada"):
+            st.dataframe(tabela_agg.reset_index(), use_container_width=True)
 
 elif aba == "Análise de Receita e Lucro":
     st.header("Análise de Receita x Despesa com Lucro (por mês).")
@@ -1036,7 +1043,7 @@ elif aba == "Relatório de Ganhos Anuais":
             unidades_df, left_on="unidade_id", right_on="id", suffixes=("", "_u")
         )
         locacoes["checkin"] = pd.to_datetime(locacoes["checkin"], errors="coerce")
-        locacoes["checkout"] = pd.to_datetime(loc["checkout"], errors="coerce")
+        locacoes["checkout"] = pd.to_datetime(locacoes["checkout"], errors="coerce")
         locacoes = locacoes.dropna(subset=["checkin", "checkout"])
         locacoes["ano"] = locacoes["checkin"].dt.year
         locacoes["mes"] = locacoes["checkin"].dt.month
