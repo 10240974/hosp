@@ -315,7 +315,7 @@ if aba == "Dashboard de Ocupação":
     st.markdown(
         """
         <h2 style="font-size:24px; color:black; font-weight:400; margin-bottom:1rem;">
-            🏠 Ocupação - Visão Geral  -  ALEX  Versão 17/11/2025
+            🏠 Ocupação - Visão Geral  -  ALEX  Versão 01/01/2026
         </h2>
         """,
         unsafe_allow_html=True
@@ -1444,13 +1444,22 @@ elif aba == "Locações":
     locacoes = get_locacoes()
 
     # Adicionar filtros de ano, mês e unidades
-    anos_disponiveis = sorted(locacoes["checkout"].apply(lambda x: pd.to_datetime(x).year).unique())
-    ano_loca_filtro = st.selectbox("Filtrar por ano", ["Todos"] + anos_disponiveis, index=anos_disponiveis.index(ano_corrente) + 1)
-    mes_loca_filtro = st.selectbox(
-        "Filtrar por mês de check-out",
-        ["Todos"] + [str(m).zfill(2) for m in range(1, 13)],
-        index=mes_corrente if "Todos" not in ["Todos"] else 0
-    )
+    # anos_disponiveis: atende vazio e garante inteiros válidos
+    checkout_years = pd.to_datetime(locacoes.get("checkout", pd.Series(dtype='object')), errors="coerce").dt.year.dropna().astype(int).unique().tolist()
+    anos_disponiveis = sorted(checkout_years)
+    anos_opts = ["Todos"] + anos_disponiveis
+    if anos_disponiveis and ano_corrente in anos_disponiveis:
+        default_ano_idx = anos_disponiveis.index(ano_corrente) + 1
+    elif anos_disponiveis:
+        default_ano_idx = 1
+    else:
+        default_ano_idx = 0
+    ano_loca_filtro = st.selectbox("Filtrar por ano", anos_opts, index=default_ano_idx)
+
+    mes_opts = ["Todos"] + [str(m).zfill(2) for m in range(1, 13)]
+    # definir mês corrente como padrão (índice igual ao número do mês)
+    mes_default_idx = mes_corrente if 1 <= mes_corrente <= 12 else 0
+    mes_loca_filtro = st.selectbox("Filtrar por mês de check-out", mes_opts, index=mes_default_idx)
 
     # Adicionar filtro de unidades
     unidades = get_unidades()
@@ -1484,12 +1493,29 @@ elif aba == "Locações":
             }
             locacoes = pd.concat([locacoes, pd.DataFrame([total_row])], ignore_index=True)
 
+        # Preparar versão formatada (pt-BR) apenas para exibição
+        locacoes_display = locacoes.copy()
+        def fmt_br(v):
+            try:
+                v = float(v or 0.0)
+            except Exception:
+                return ""
+            s = f"{v:,.2f}"              # 1,234.56
+            s = s.replace(",", "X").replace(".", ",").replace("X", ".")  # 1.234,56
+            return f"R$ {s}"
+
+        locacoes_display["valor"] = locacoes_display["valor"].apply(fmt_br)
+
         if MOBILE:
             if locacoes.empty:
                 st.info("Sem registros para os filtros.")
             else:
-                st.dataframe(locacoes[["id", "nome", "checkin", "checkout", "hospede", "valor", "plataforma", "status_pagamento"]], use_container_width=True)
+                st.dataframe(locacoes_display[["id", "nome", "checkin", "checkout", "hospede", "valor", "plataforma", "status_pagamento"]], use_container_width=True)
         else:
+            # Mostrar pré-visualização formatada e manter editor numérico abaixo
+            st.markdown("**Visualização (valor formatado - pt-BR)**")
+            st.dataframe(locacoes_display[["id", "nome", "checkin", "checkout", "hospede", "valor", "plataforma", "status_pagamento"]], use_container_width=True, height=300)
+
             edited_df = st.data_editor(
                 locacoes[["id", "nome", "checkin", "checkout", "hospede", "valor", "plataforma", "status_pagamento"]],
                 num_rows="dynamic", use_container_width=True, key="editor_locacoes"
